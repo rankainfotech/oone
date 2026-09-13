@@ -179,7 +179,7 @@ const mapItem = (r) => ({ id: r.id, customerId: r.customer_id, date: r.date, pri
 const mapReceipt = (r) => ({ id: r.id, itemId: r.item_id, customerId: r.customer_id, date: r.date, principalPaid: Number(r.principal_paid), interestPaid: Number(r.interest_paid), paymentMode: r.payment_mode, bankAccountId: r.bank_account_id });
 const mapBank = (r) => ({ id: r.id, bankName: r.bank_name, accountNumber: r.account_number, ifsc: r.ifsc, branch: r.branch });
 const mapTenant = (r) => ({
-  id: r.id, businessName: r.business_name, status: r.status, isPaid: r.is_paid,
+  id: r.id, businessName: r.business_name, status: r.status, isPaid: r.is_paid, logo: r.logo, validUntil: r.valid_until,
   email: r.email, contactNo: r.contact_no, pan: r.pan, gstn: r.gstn,
   officeNo: r.office_no, buildingName: r.building_name, roadName: r.road_name, area: r.area,
   city: r.city, state: r.state, country: r.country, pinCode: r.pin_code,
@@ -193,6 +193,17 @@ async function fetchCustomers() { const { data, error } = await supabase.from("c
 async function fetchItems() { const { data, error } = await supabase.from("items").select("*"); if (error) throw error; return data.map(mapItem); }
 async function fetchReceipts() { const { data, error } = await supabase.from("receipts").select("*"); if (error) throw error; return data.map(mapReceipt); }
 async function fetchBankAccounts() { const { data, error } = await supabase.from("bank_accounts").select("*").order("bank_name"); if (error) throw error; return data.map(mapBank); }
+
+// Explicit tenant_id filters — used only by Super Admin's read-only company drill-down
+async function fetchTenantScoped(tenantId) {
+  const [{ data: c, error: e1 }, { data: i, error: e2 }, { data: r, error: e3 }] = await Promise.all([
+    supabase.from("customers").select("*").eq("tenant_id", tenantId),
+    supabase.from("items").select("*").eq("tenant_id", tenantId),
+    supabase.from("receipts").select("*").eq("tenant_id", tenantId),
+  ]);
+  if (e1) throw e1; if (e2) throw e2; if (e3) throw e3;
+  return { customers: c.map(mapCustomer), items: i.map(mapItem), receipts: r.map(mapReceipt) };
+}
 
 async function findCustomerByMobile(mobile, excludeId) {
   const { data, error } = await supabase.from("customers").select("id,name,mobile").eq("mobile", mobile);
@@ -255,6 +266,7 @@ async function deleteReceiptRow(id) { const { error } = await supabase.from("rec
 async function upsertBankAccount(b) {
   const row = { bank_name: b.bankName, account_number: b.accountNumber, ifsc: b.ifsc, branch: b.branch };
   if (b.id) { const { error } = await supabase.from("bank_accounts").update(row).eq("id", b.id); if (error) throw error; return b.id; }
+  if (b.tenantId) row.tenant_id = b.tenantId;
   const { data, error } = await supabase.from("bank_accounts").insert(row).select().single();
   if (error) throw error; return data.id;
 }
@@ -264,7 +276,7 @@ async function updateTenantRow(id, t) {
   const row = {
     business_name: t.businessName, email: t.email, contact_no: t.contactNo, pan: t.pan, gstn: t.gstn,
     office_no: t.officeNo, building_name: t.buildingName, road_name: t.roadName, area: t.area,
-    city: t.city, state: t.state, country: t.country, pin_code: t.pinCode,
+    city: t.city, state: t.state, country: t.country, pin_code: t.pinCode, logo: t.logo,
   };
   const { error } = await supabase.from("tenants").update(row).eq("id", id);
   if (error) throw error;
@@ -360,6 +372,9 @@ export default function App() {
     );
   }
 
+  const isExpired = tenant?.validUntil && !profile.is_super_admin && todayISO() > tenant.validUntil;
+  const blockIfExpired = () => { if (isExpired) { showToast(`Your account validity ended on ${tenant.validUntil}. Contact support to renew.`); return true; } return false; };
+
   const navItems = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
     { id: "customers", label: "Customers", icon: Users },
@@ -376,13 +391,19 @@ export default function App() {
       {lightboxUrl && <Lightbox url={lightboxUrl} onClose={() => setLightboxUrl(null)} />}
       {toast && <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-[var(--ink)] text-white text-sm px-4 py-2 rounded-full shadow-lg font-body">{toast}</div>}
 
-      <Sidebar navItems={navItems} screen={screen} setScreen={setScreen} onLogout={() => supabase.auth.signOut()} />
+      <Sidebar navItems={navItems} screen={screen} setScreen={setScreen} onLogout={() => supabase.auth.signOut()} tenantLogo={tenant?.logo} />
+      <MobileTopBar tenantLogo={tenant?.logo} businessName={tenant?.businessName} extraItems={navItems.slice(5)} screen={screen} setScreen={setScreen} onLogout={() => supabase.auth.signOut()} />
 
-      <div className="pl-16 md:pl-56">
-        <TopBar businessName={tenant?.businessName} screen={screen} navItems={navItems} />
-        <main className="max-w-6xl mx-auto px-4 pb-16 pt-5">
+      <div className="md:pl-56">
+        <div className="hidden md:block"><TopBar businessName={tenant?.businessName} screen={screen} navItems={navItems} /></div>
+        <main className="max-w-6xl mx-auto px-4 pb-24 md:pb-16 pt-5">
+          {isExpired && (
+            <div className="mb-5 bg-[var(--red)]/10 border border-[var(--red)]/30 text-[var(--red)] text-sm font-body rounded-lg px-4 py-3 flex items-center gap-2">
+              <AlertTriangle size={16} /> Your account validity ended on {tenant.validUntil}. You can still view existing records, but new entries are disabled until this is renewed.
+            </div>
+          )}
           {screen === "dashboard" && (
-            <Dashboard customers={customers} items={items} receipts={receipts} openLedger={openLedger} onOpenLightbox={setLightboxUrl} />
+            <Dashboard customers={customers} items={items} receipts={receipts} bankAccounts={bankAccounts} openLedger={openLedger} onOpenLightbox={setLightboxUrl} />
           )}
           {screen === "customers" && (
             <CustomersScreen customers={customers} items={items}
@@ -398,12 +419,16 @@ export default function App() {
           )}
           {screen === "customerForm" && (
             <CustomerForm existing={editCustomer} onCancel={() => setScreen("customers")} onOpenLightbox={setLightboxUrl}
-              onSaved={async (c) => { await upsertCustomer(c); await loadAll(); showToast("Customer saved"); setScreen("customers"); }} />
+              onSaved={async (c) => {
+                if (!c.id && blockIfExpired()) return;
+                await upsertCustomer(c); await loadAll(); showToast("Customer saved"); setScreen("customers");
+              }} />
           )}
           {screen === "payment" && (
             <PaymentEntry customers={customers} bankAccounts={bankAccounts} existing={editItem}
               onSaveCustomer={async (c) => { const id = await upsertCustomer(c); await loadAll(); return id; }}
               onSave={async (item) => {
+                if (!editItem && blockIfExpired()) return;
                 if (editItem) await updateItemRow(editItem.id, item); else await insertItem(item);
                 await loadAll(); showToast(editItem ? "Loan updated" : "Payment (loan) recorded");
                 setEditItem(null); setScreen(editItem ? "ledger" : "dashboard");
@@ -412,6 +437,7 @@ export default function App() {
           {screen === "receipt" && (
             <ReceiptEntry customers={customers} items={items} receipts={receipts} bankAccounts={bankAccounts} existing={editReceipt}
               onSave={async (r) => {
+                if (!editReceipt && blockIfExpired()) return;
                 if (editReceipt) await updateReceiptRow(editReceipt.id, r); else await insertReceipt(r);
                 await loadAll(); showToast(editReceipt ? "Receipt updated" : "Receipt recorded");
                 setEditReceipt(null); setScreen(editReceipt ? "ledger" : "dashboard");
@@ -437,13 +463,14 @@ export default function App() {
           {screen === "reports" && <ReportsScreen customers={customers} items={items} receipts={receipts} openLedger={openLedger} />}
           {screen === "profile" && (
             <ProfileScreen tenant={tenant} bankAccounts={bankAccounts} customers={customers} items={items} receipts={receipts}
-              onSaveTenant={async (t) => { await updateTenantRow(tenant.id, t); await reloadTenant(); showToast("Company profile saved"); }}
-              onAddBank={async (b) => { await upsertBankAccount(b); await loadAll(); showToast("Bank account saved"); }}
-              onDeleteBank={async (id) => { await deleteBankAccount(id); await loadAll(); showToast("Bank account removed"); }} />
+              onSaveTenant={async (t) => { try { await updateTenantRow(tenant.id, t); await reloadTenant(); showToast("Company profile saved"); } catch (e) { showToast("Could not save: " + e.message); } }}
+              onAddBank={async (b) => { await upsertBankAccount({ ...b, tenantId: tenant.id }); await loadAll(); showToast("Bank account saved"); }}
+              onDeleteBank={async (id) => { try { await deleteBankAccount(id); await loadAll(); showToast("Bank account removed"); } catch (e) { showToast("Could not remove: " + e.message); } }} />
           )}
           {screen === "admin" && profile.is_super_admin && <AdminScreen />}
         </main>
       </div>
+      <MobileBottomNav navItems={navItems} screen={screen} setScreen={setScreen} />
     </div>
   );
 }
@@ -462,10 +489,16 @@ function AuthScreen() {
     setErr(""); setInfo("");
     if (!email || password.length < 6 || !businessName.trim()) { setErr("Fill in your business name, email, and a password of 6+ characters."); return; }
     setBusy(true);
-    const { error } = await supabase.auth.signUp({ email, password, options: { data: { business_name: businessName.trim(), full_name: fullName.trim() } } });
+    const { data, error } = await supabase.auth.signUp({ email, password, options: { data: { business_name: businessName.trim(), full_name: fullName.trim() } } });
     setBusy(false);
-    if (error) setErr(error.message);
-    else setInfo("Account created. If email confirmation is on, check your inbox — otherwise you're logged in already.");
+    if (error) {
+      if (/already registered|already exists/i.test(error.message)) setErr("An account with this email already exists. Please log in instead.");
+      else setErr(error.message);
+    } else if (data?.user && data.user.identities && data.user.identities.length === 0) {
+      setErr("An account with this email already exists. Please log in instead.");
+    } else {
+      setInfo("Account created. If email confirmation is on, check your inbox — otherwise you're logged in already.");
+    }
   };
   const login = async () => {
     setErr(""); setBusy(true);
@@ -485,8 +518,8 @@ function AuthScreen() {
     <div className="min-h-screen flex items-center justify-center px-4 bg-white">
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
-          <img src={LOGO_DATA_URI} alt="OONE" className="h-14 mx-auto mb-4 object-contain" />
-          <p className="text-[var(--ink-soft)] text-sm font-body">Mortgage &amp; interest ledger for your business.</p>
+          <img src={LOGO_DATA_URI} alt="OONE" className="h-32 mx-auto object-contain" />
+          <p className="text-[var(--ink-soft)] text-sm font-body mt-2">Mortgage &amp; Interest Ledger For Your Business.</p>
         </div>
         <div className="bg-white border border-[var(--line)] rounded-xl p-6 shadow-sm">
           {showForgotPw ? (
@@ -534,12 +567,16 @@ function AuthScreen() {
                 className="w-full mt-5 bg-[var(--ink)] text-white rounded py-2.5 font-body font-medium text-sm hover:opacity-90 disabled:opacity-50">
                 {busy ? "Please wait…" : mode === "login" ? "Log in" : "Create business account"}
               </button>
+              {mode === "signup" && (
+                <p className="text-[10px] text-[var(--ink-soft)] font-body mt-3 text-center leading-relaxed">
+                  By continuing, you agree to our{" "}
+                  <a href="https://rojmel.com/terms-and-condition" target="_blank" rel="noreferrer" className="underline hover:text-[var(--ink)]">Terms of Service</a> and{" "}
+                  <a href="https://rojmel.com/privacy-policy" target="_blank" rel="noreferrer" className="underline hover:text-[var(--ink)]">Privacy Policy</a>.
+                </p>
+              )}
             </>
           )}
         </div>
-        <p className="text-center text-[var(--ink-soft)] text-xs mt-5 font-body flex items-center justify-center gap-1">
-          <ShieldCheck size={12} /> Each business's data is kept private and separate
-        </p>
       </div>
     </div>
   );
@@ -572,24 +609,69 @@ function ResetPasswordScreen({ onDone }) {
 }
 
 /* ---------------- Sidebar & top bar ---------------- */
-function Sidebar({ navItems, screen, setScreen, onLogout }) {
+function Sidebar({ navItems, screen, setScreen, onLogout, tenantLogo }) {
   return (
-    <div className="fixed left-0 top-0 bottom-0 z-40 w-16 md:w-56 bg-white border-r border-[var(--line)] flex flex-col">
-      <div className="h-16 flex items-center justify-center md:justify-start md:px-5 border-b border-[var(--line)]">
-        <img src={LOGO_DATA_URI} alt="OONE" className="h-7 object-contain" />
+    <div className="hidden md:flex fixed left-0 top-0 bottom-0 z-40 w-56 bg-white border-r border-[var(--line)] flex-col">
+      <div className="h-20 flex items-center px-5 border-b border-[var(--line)]">
+        <img src={tenantLogo || LOGO_DATA_URI} alt="Logo" className="h-12 max-w-full object-contain" />
       </div>
       <nav className="flex-1 py-3">
         {navItems.map(({ id, label, icon: Icon }) => (
           <button key={id} onClick={() => setScreen(id)}
             className={`w-full flex items-center gap-3 px-5 py-2.5 text-sm font-body transition-colors ${screen === id ? "bg-[var(--paper-dim)] text-[var(--ink)] font-medium border-r-2 border-[var(--ink)]" : "text-[var(--ink-soft)] hover:bg-[var(--paper-dim)]"}`}>
             <Icon size={18} className="shrink-0" />
-            <span className="hidden md:inline">{label}</span>
+            <span>{label}</span>
           </button>
         ))}
       </nav>
       <button onClick={onLogout} className="flex items-center gap-3 px-5 py-4 text-sm font-body text-[var(--ink-soft)] hover:text-[var(--ink)] border-t border-[var(--line)]">
-        <LogOut size={18} className="shrink-0" /><span className="hidden md:inline">Log out</span>
+        <LogOut size={18} className="shrink-0" /><span>Log out</span>
       </button>
+      {tenantLogo && (
+        <div className="px-5 py-3 border-t border-[var(--line)] flex items-center gap-1.5">
+          <img src={LOGO_DATA_URI} alt="OONE" className="h-4 object-contain opacity-60" />
+          <span className="text-[10px] text-[var(--ink-soft)] font-body">Powered by OONE</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MobileBottomNav({ navItems, screen, setScreen }) {
+  const primary = navItems.slice(0, 5);
+  return (
+    <div className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white border-t border-[var(--line)] flex" style={{ paddingBottom: "env(safe-area-inset-bottom)" }}>
+      {primary.map(({ id, label, icon: Icon }) => (
+        <button key={id} onClick={() => setScreen(id)}
+          className={`flex-1 flex flex-col items-center gap-0.5 py-2 text-[10px] font-body ${screen === id ? "text-[var(--ink)] font-medium" : "text-[var(--ink-soft)]"}`}>
+          <Icon size={20} strokeWidth={screen === id ? 2.3 : 1.8} />
+          <span>{label}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+function MobileTopBar({ tenantLogo, businessName, extraItems, screen, setScreen, onLogout }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="md:hidden sticky top-0 z-30 bg-white/95 backdrop-blur border-b border-[var(--line)]">
+      <div className="h-16 flex items-center px-4 gap-2">
+        <img src={tenantLogo || LOGO_DATA_URI} alt="Logo" className="h-9 object-contain" />
+        <span className="font-display text-base truncate flex-1">{businessName}</span>
+        <button onClick={() => setOpen((o) => !o)} className="text-[var(--ink-soft)] p-1"><UserCog size={20} /></button>
+      </div>
+      {open && (
+        <div className="border-t border-[var(--line)] bg-white">
+          {extraItems.map(({ id, label, icon: Icon }) => (
+            <button key={id} onClick={() => { setScreen(id); setOpen(false); }} className="w-full flex items-center gap-3 px-5 py-3 text-sm font-body text-[var(--ink-soft)] border-b border-[var(--line)]">
+              <Icon size={17} /> {label}
+            </button>
+          ))}
+          <button onClick={onLogout} className="w-full flex items-center gap-3 px-5 py-3 text-sm font-body text-[var(--ink-soft)]">
+            <LogOut size={17} /> Log out
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -638,14 +720,16 @@ function PeriodBar({ period }) {
 }
 
 /* ---------------- Dashboard ---------------- */
-function Dashboard({ customers, items, receipts, openLedger, onOpenLightbox }) {
+function Dashboard({ customers, items, receipts, bankAccounts, openLedger, onOpenLightbox }) {
   const period = usePeriod();
   const { start, end } = period;
+  const asOfClamped = end > todayISO() ? todayISO() : end;
   const custName = (id) => customers.find((c) => c.id === id)?.name || "Unknown";
   const custMobile = (id) => customers.find((c) => c.id === id)?.mobile || "";
 
   const stats = useMemo(() => {
     let totalLentInPeriod = 0, outstandingPrincipal = 0, cashBalance = 0, bankBalance = 0;
+    const byBankAccount = {};
     const dueByCustomer = {};
     let interestReceivedInPeriod = 0;
     const upcomingByCustomer = {};
@@ -653,7 +737,7 @@ function Dashboard({ customers, items, receipts, openLedger, onOpenLightbox }) {
     for (const item of items) {
       const itemReceipts = receipts.filter((r) => r.itemId === item.id);
       if (item.date >= start && item.date <= end) totalLentInPeriod += item.principal;
-      const state = computeItemState(item, itemReceipts, end);
+      const state = computeItemState(item, itemReceipts, asOfClamped);
       outstandingPrincipal += state.balance;
       if (!state.isClosed && state.unpaidInterest > 1) {
         dueByCustomer[item.customerId] = (dueByCustomer[item.customerId] || 0) + state.unpaidInterest;
@@ -667,18 +751,20 @@ function Dashboard({ customers, items, receipts, openLedger, onOpenLightbox }) {
       interestReceivedInPeriod += itemReceipts.filter((r) => r.date >= start && r.date <= end).reduce((s, r) => s + (r.interestPaid || 0), 0);
 
       if (item.date <= end) {
-        if (item.paymentMode === "bank") bankBalance -= item.principal; else cashBalance -= item.principal;
+        if (item.paymentMode === "bank") { bankBalance -= item.principal; if (item.bankAccountId) byBankAccount[item.bankAccountId] = (byBankAccount[item.bankAccountId] || 0) - item.principal; }
+        else cashBalance -= item.principal;
       }
       itemReceipts.filter((r) => r.date <= end).forEach((r) => {
         const amt = (r.principalPaid || 0) + (r.interestPaid || 0);
-        if (r.paymentMode === "bank") bankBalance += amt; else cashBalance += amt;
+        if (r.paymentMode === "bank") { bankBalance += amt; if (r.bankAccountId) byBankAccount[r.bankAccountId] = (byBankAccount[r.bankAccountId] || 0) + amt; }
+        else cashBalance += amt;
       });
     }
 
     const dueList = Object.entries(dueByCustomer).map(([customerId, due]) => ({ customerId, due })).sort((a, b) => b.due - a.due);
     const upcomingList = Object.entries(upcomingByCustomer).map(([customerId, days]) => ({ customerId, days })).sort((a, b) => b.days - a.days);
 
-    return { totalLentInPeriod, outstandingPrincipal, interestDue: dueList.reduce((s, d) => s + d.due, 0), interestReceivedInPeriod, cashBalance, bankBalance, dueList: dueList.slice(0, 8), upcomingList: upcomingList.slice(0, 8) };
+    return { totalLentInPeriod, outstandingPrincipal, interestDue: dueList.reduce((s, d) => s + d.due, 0), interestReceivedInPeriod, cashBalance, bankBalance, byBankAccount, dueList: dueList.slice(0, 8), upcomingList: upcomingList.slice(0, 8) };
   }, [items, receipts, start, end]);
 
   const cards = [
@@ -693,7 +779,7 @@ function Dashboard({ customers, items, receipts, openLedger, onOpenLightbox }) {
   return (
     <div>
       <PeriodBar period={period} />
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-8">
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-3">
         {cards.map((c) => (
           <div key={c.label} className="bg-white rounded-lg p-4 border border-[var(--line)]">
             <div className="text-[11px] font-body text-[var(--ink-soft)] mb-1.5">{c.label}</div>
@@ -701,6 +787,15 @@ function Dashboard({ customers, items, receipts, openLedger, onOpenLightbox }) {
           </div>
         ))}
       </div>
+      {bankAccounts.length > 0 && (
+        <div className="flex flex-wrap gap-2 mb-8">
+          {bankAccounts.map((b) => (
+            <div key={b.id} className="text-xs font-body bg-[var(--paper-dim)] rounded-full px-3 py-1.5">
+              {b.bankName} ({b.accountNumber.slice(-4)}): <b className="tabnum">{inr(stats.byBankAccount[b.id] || 0)}</b>
+            </div>
+          ))}
+        </div>
+      )}
 
       <h3 className="font-display text-lg mb-3">Interest due, highest first</h3>
       {stats.dueList.length === 0 ? (
@@ -1024,8 +1119,9 @@ function ReceiptEntry({ customers, items, receipts, bankAccounts, existing, onSa
 }
 
 /* ---------------- Ledger ---------------- */
-function LedgerScreen({ customers, items, receipts, selectedCustomerId, setSelectedCustomerId, onOpenLightbox, onEditItem, onDeleteItem, onEditReceipt, onDeleteReceipt }) {
+function LedgerScreen({ customers, items, receipts, selectedCustomerId, setSelectedCustomerId, onOpenLightbox, onEditItem, onDeleteItem, onEditReceipt, onDeleteReceipt, readOnly }) {
   const customer = customers.find((c) => c.id === selectedCustomerId);
+  const period = usePeriod();
   if (!customer) {
     return (
       <div>
@@ -1036,16 +1132,17 @@ function LedgerScreen({ customers, items, receipts, selectedCustomerId, setSelec
       </div>
     );
   }
+  const { start, end } = period;
+  const asOf = end > todayISO() ? todayISO() : end;
   const custItems = items.filter((i) => i.customerId === customer.id).sort((a, b) => (a.date < b.date ? 1 : -1));
-  const asOf = todayISO();
   const dueTotal = custItems.reduce((s, it) => s + computeItemState(it, receipts.filter((r) => r.itemId === it.id), asOf).unpaidInterest, 0);
 
   const rows = [];
   for (const item of custItems) {
     const itemReceipts = receipts.filter((r) => r.itemId === item.id);
     const state = computeItemState(item, itemReceipts, asOf);
-    rows.push({ type: "loan", date: item.date, desc: item.description || "Mortgaged item", amount: item.principal, item });
-    itemReceipts.forEach((r) => {
+    if (item.date >= start && item.date <= end) rows.push({ type: "loan", date: item.date, desc: item.description || "Mortgaged item", amount: item.principal, item });
+    itemReceipts.filter((r) => r.date >= start && r.date <= end).forEach((r) => {
       const tag = state.receiptTags.find((t) => t.receiptId === r.id);
       rows.push({ type: "receipt", date: r.date, desc: `Receipt — ${item.description || "item"}`, principalPaid: r.principalPaid, interestPaid: r.interestPaid, receipt: r, item, shortfall: tag?.shortfall || 0, excess: tag?.excess || 0 });
     });
@@ -1055,6 +1152,7 @@ function LedgerScreen({ customers, items, receipts, selectedCustomerId, setSelec
   return (
     <div>
       <BackHeader title="Customer ledger" onBack={() => setSelectedCustomerId(null)} />
+      <PeriodBar period={period} />
       <div className="flex flex-wrap gap-4 items-center bg-white border border-[var(--line)] rounded-lg p-4 mb-5">
         <Thumb src={customer.photo} size="w-16 h-16" onOpen={onOpenLightbox} />
         <div className="flex-1 min-w-[200px]">
@@ -1086,13 +1184,13 @@ function LedgerScreen({ customers, items, receipts, selectedCustomerId, setSelec
               </div>
               <div className="flex items-center gap-2 shrink-0">
                 <span className={`text-[10px] font-body font-medium px-2 py-0.5 rounded-full ${state.isClosed ? "bg-[var(--green)]/10 text-[var(--green-dark)]" : "bg-[var(--red)]/10 text-[var(--red)]"}`}>{state.isClosed ? "Redeemed" : "Active"}</span>
-                <button onClick={() => onEditItem(item)} className="text-[var(--ink-soft)] hover:text-[var(--ink)]"><Pencil size={14} /></button>
-                <button onClick={() => onDeleteItem(item)} className="text-[var(--ink-soft)] hover:text-[var(--red)]"><Trash2 size={14} /></button>
+                {!readOnly && <button onClick={() => onEditItem(item)} className="text-[var(--ink-soft)] hover:text-[var(--ink)]"><Pencil size={14} /></button>}
+                {!readOnly && <button onClick={() => onDeleteItem(item)} className="text-[var(--ink-soft)] hover:text-[var(--red)]"><Trash2 size={14} /></button>}
               </div>
             </div>
             <div className="px-4 py-2 flex justify-between text-xs font-body">
               <span>Outstanding: <b className="tabnum">{inr(state.balance)}</b></span>
-              <span>Interest due today: <b className="tabnum text-[var(--red)]">{inr(state.unpaidInterest)}</b></span>
+              <span>Interest due as of {asOf}: <b className="tabnum text-[var(--red)]">{inr(state.unpaidInterest)}</b></span>
             </div>
           </div>
         );
@@ -1114,7 +1212,7 @@ function LedgerScreen({ customers, items, receipts, selectedCustomerId, setSelec
                 <td className="py-2 pr-2 text-right tabnum">{r.type === "loan" ? inr(r.amount) : (r.principalPaid ? "-" + inr(r.principalPaid) : "—")}</td>
                 <td className="py-2 pr-2 text-right tabnum">{r.type === "receipt" && r.interestPaid ? "-" + inr(r.interestPaid) : "—"}</td>
                 <td className="py-2 pr-2 text-right whitespace-nowrap">
-                  {r.type === "receipt" ? (
+                  {r.type === "receipt" && !readOnly ? (
                     <span className="inline-flex gap-2">
                       <button onClick={() => onEditReceipt(r.receipt)} className="text-[var(--ink-soft)] hover:text-[var(--ink)]"><Pencil size={13} /></button>
                       <button onClick={() => onDeleteReceipt(r.receipt)} className="text-[var(--ink-soft)] hover:text-[var(--red)]"><Trash2 size={13} /></button>
@@ -1196,14 +1294,16 @@ function ProfileScreen({ tenant, bankAccounts, customers, items, receipts, onSav
   const [t, setT] = useState(tenant);
   const [saving, setSaving] = useState(false);
   const [newBank, setNewBank] = useState({ bankName: "", accountNumber: "", ifsc: "", branch: "" });
+  const [bankErr, setBankErr] = useState("");
   useEffect(() => { setT(tenant); }, [tenant]);
   const set = (k, v) => setT((prev) => ({ ...prev, [k]: v }));
 
   const save = async () => { setSaving(true); try { await onSaveTenant(t); } finally { setSaving(false); } };
   const addBank = async () => {
-    if (!newBank.bankName.trim() || !newBank.accountNumber.trim()) return;
-    await onAddBank(newBank);
-    setNewBank({ bankName: "", accountNumber: "", ifsc: "", branch: "" });
+    setBankErr("");
+    if (!newBank.bankName.trim() || !newBank.accountNumber.trim()) { setBankErr("Enter at least a bank name and account number."); return; }
+    try { await onAddBank(newBank); setNewBank({ bankName: "", accountNumber: "", ifsc: "", branch: "" }); }
+    catch (e) { setBankErr(e.message || "Could not save this bank account."); }
   };
 
   return (
@@ -1211,6 +1311,7 @@ function ProfileScreen({ tenant, bankAccounts, customers, items, receipts, onSav
       <div>
         <h2 className="font-display text-xl mb-4">My Profile</h2>
         <div className="bg-white border border-[var(--line)] rounded-lg p-5 space-y-4">
+          <PhotoPicker label="Company logo (shown in your sidebar after login)" value={t.logo} onChange={(v) => set("logo", v)} />
           <Field label="Company name"><input className={inputCls} value={t.businessName || ""} onChange={e => set("businessName", e.target.value)} /></Field>
           <div className="grid grid-cols-2 gap-3">
             <Field label="Email"><input type="email" className={inputCls} value={t.email || ""} onChange={e => set("email", e.target.value)} /></Field>
@@ -1235,7 +1336,6 @@ function ProfileScreen({ tenant, bankAccounts, customers, items, receipts, onSav
           </div>
           <div className="flex items-center justify-between pt-2">
             <span className="text-xs font-body text-[var(--ink-soft)]">Plan: <b className={t.isPaid ? "text-[var(--green-dark)]" : "text-[var(--ink-soft)]"}>{t.isPaid ? "Paid" : "Free"}</b></span>
-            <button disabled={saving} onClick={save} className="bg-[var(--ink)] disabled:opacity-50 text-white rounded px-5 py-2 font-body font-medium text-sm">{saving ? "Saving…" : "Save profile"}</button>
           </div>
         </div>
       </div>
@@ -1255,6 +1355,7 @@ function ProfileScreen({ tenant, bankAccounts, customers, items, receipts, onSav
             <input placeholder="IFSC" className={inputCls} value={newBank.ifsc} onChange={e => setNewBank({ ...newBank, ifsc: e.target.value })} />
             <input placeholder="Branch" className={inputCls} value={newBank.branch} onChange={e => setNewBank({ ...newBank, branch: e.target.value })} />
           </div>
+          {bankErr && <p className="text-[10px] text-[var(--red)] font-body">{bankErr}</p>}
           <button onClick={addBank} className="text-xs font-body font-medium text-[var(--ink)] underline flex items-center gap-1"><Plus size={12} /> Add bank account</button>
         </div>
       </div>
@@ -1266,6 +1367,10 @@ function ProfileScreen({ tenant, bankAccounts, customers, items, receipts, onSav
           <Download size={16} /> Download Excel backup
         </button>
       </div>
+
+      <div className="pt-2 pb-8">
+        <button disabled={saving} onClick={save} className="w-full bg-[var(--ink)] disabled:opacity-50 text-white rounded py-3 font-body font-medium text-sm">{saving ? "Saving…" : "Save Profile"}</button>
+      </div>
     </div>
   );
 }
@@ -1273,48 +1378,113 @@ function ProfileScreen({ tenant, bankAccounts, customers, items, receipts, onSav
 /* ---------------- Super Admin (platform owner) ---------------- */
 function AdminScreen() {
   const [tenants, setTenants] = useState(null);
-  const [activity, setActivity] = useState({});
+  const [openTenantId, setOpenTenantId] = useState(null);
   const load = async () => {
     const { data: t, error } = await supabase.from("tenants").select("*").order("created_at", { ascending: false });
     if (!error) setTenants(t);
-    const [{ data: allItems }, { data: allReceipts }] = await Promise.all([
-      supabase.from("items").select("tenant_id,created_at"),
-      supabase.from("receipts").select("tenant_id,created_at"),
-    ]);
-    const act = {};
-    (allItems || []).concat(allReceipts || []).forEach((row) => {
-      const prev = act[row.tenant_id];
-      if (!prev || row.created_at > prev) act[row.tenant_id] = row.created_at;
-    });
-    setActivity(act);
   };
   useEffect(() => { load(); }, []);
 
   const toggleStatus = async (t) => { await supabase.from("tenants").update({ status: t.status === "active" ? "suspended" : "active" }).eq("id", t.id); load(); };
   const togglePaid = async (t) => { await supabase.from("tenants").update({ is_paid: !t.is_paid }).eq("id", t.id); load(); };
+  const setValidUntil = async (t, date) => { await supabase.from("tenants").update({ valid_until: date || null }).eq("id", t.id); load(); };
 
+  if (openTenantId) return <AdminTenantView tenantId={openTenantId} onBack={() => setOpenTenantId(null)} />;
   if (tenants === null) return <p className="text-sm text-[var(--ink-soft)] font-body">Loading sign-ups…</p>;
 
   return (
     <div>
       <h2 className="font-display text-xl mb-1 flex items-center gap-2"><ShieldAlert size={18} className="text-[var(--brass-dark)]" /> Platform Admin</h2>
-      <p className="text-xs text-[var(--ink-soft)] font-body mb-6">Every business that has signed up for OONE.</p>
+      <p className="text-xs text-[var(--ink-soft)] font-body mb-6">Every business that has signed up for OONE. Click a company to open it.</p>
       <div className="space-y-2">
-        {tenants.map((t) => (
-          <div key={t.id} className="bg-white border border-[var(--line)] rounded-lg px-4 py-3 flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <div className="font-body text-sm font-medium">{t.business_name}</div>
-              <div className="text-xs text-[var(--ink-soft)] font-body">Signed up {new Date(t.created_at).toLocaleDateString("en-IN")} · Last activity {activity[t.id] ? new Date(activity[t.id]).toLocaleDateString("en-IN") : "never"}</div>
+        {tenants.map((t) => {
+          const expired = t.valid_until && t.valid_until < todayISO();
+          return (
+            <div key={t.id} className="bg-white border border-[var(--line)] rounded-lg px-4 py-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <button onClick={() => setOpenTenantId(t.id)} className="text-left flex-1 min-w-[200px]">
+                  <div className="font-body text-sm font-medium underline">{t.business_name}</div>
+                  <div className="text-xs text-[var(--ink-soft)] font-body">{t.email || "—"} · {t.contact_no || "no contact number"}</div>
+                  <div className="text-xs text-[var(--ink-soft)] font-body">Signed up {new Date(t.created_at).toLocaleDateString("en-IN")}</div>
+                </button>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button onClick={() => togglePaid(t)} className={`text-[10px] font-body font-medium px-2 py-0.5 rounded-full border ${t.is_paid ? "bg-[var(--green)]/10 text-[var(--green-dark)] border-[var(--green)]/30" : "text-[var(--ink-soft)] border-[var(--line)]"}`}>{t.is_paid ? "Paid" : "Free"}</button>
+                  <span className={`text-[10px] font-body font-medium px-2 py-0.5 rounded-full ${t.status === "active" ? "bg-[var(--green)]/10 text-[var(--green-dark)]" : "bg-[var(--red)]/10 text-[var(--red)]"}`}>{t.status}</span>
+                  {expired && <span className="text-[10px] font-body font-medium px-2 py-0.5 rounded-full bg-[var(--red)]/10 text-[var(--red)]">Expired</span>}
+                  <button onClick={() => toggleStatus(t)} className="text-xs font-body font-medium flex items-center gap-1 border border-[var(--line)] rounded px-2 py-1 hover:border-[var(--ink)]">
+                    {t.status === "active" ? <><Ban size={12} /> Suspend</> : <><CheckCircle2 size={12} /> Activate</>}
+                  </button>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 mt-2 pt-2 border-t border-[var(--line)]">
+                <span className="text-[10px] font-body text-[var(--ink-soft)]">Valid until:</span>
+                <input type="date" value={t.valid_until || ""} onChange={(e) => setValidUntil(t, e.target.value)} className="text-xs font-body border border-[var(--line)] rounded px-2 py-1" />
+                <span className="text-[10px] text-[var(--ink-soft)] font-body">(blank = never expires)</span>
+              </div>
             </div>
-            <div className="flex items-center gap-2">
-              <button onClick={() => togglePaid(t)} className={`text-[10px] font-body font-medium px-2 py-0.5 rounded-full border ${t.is_paid ? "bg-[var(--green)]/10 text-[var(--green-dark)] border-[var(--green)]/30" : "text-[var(--ink-soft)] border-[var(--line)]"}`}>{t.is_paid ? "Paid" : "Free"}</button>
-              <span className={`text-[10px] font-body font-medium px-2 py-0.5 rounded-full ${t.status === "active" ? "bg-[var(--green)]/10 text-[var(--green-dark)]" : "bg-[var(--red)]/10 text-[var(--red)]"}`}>{t.status}</span>
-              <button onClick={() => toggleStatus(t)} className="text-xs font-body font-medium flex items-center gap-1 border border-[var(--line)] rounded px-2 py-1 hover:border-[var(--ink)]">
-                {t.status === "active" ? <><Ban size={12} /> Suspend</> : <><CheckCircle2 size={12} /> Activate</>}
-              </button>
-            </div>
-          </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* Read-only company drill-down for Super Admin */
+function AdminTenantView({ tenantId, onBack }) {
+  const [tenant, setTenant] = useState(null);
+  const [customers, setCustomers] = useState([]);
+  const [items, setItems] = useState([]);
+  const [receipts, setReceipts] = useState([]);
+  const [selectedCustomerId, setSelectedCustomerId] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      const { data: t } = await supabase.from("tenants").select("*").eq("id", tenantId).single();
+      setTenant(t);
+      const scoped = await fetchTenantScoped(tenantId);
+      setCustomers(scoped.customers); setItems(scoped.items); setReceipts(scoped.receipts);
+      setLoading(false);
+    })();
+  }, [tenantId]);
+
+  if (loading) return <p className="text-sm text-[var(--ink-soft)] font-body">Loading company…</p>;
+
+  if (selectedCustomerId) {
+    return (
+      <div>
+        <p className="text-xs font-body text-[var(--ink-soft)] mb-2 bg-[var(--paper-dim)] inline-block px-2 py-1 rounded">Viewing {tenant.business_name} — read only</p>
+        <LedgerScreen customers={customers} items={items} receipts={receipts} selectedCustomerId={selectedCustomerId} setSelectedCustomerId={setSelectedCustomerId} onOpenLightbox={() => {}} readOnly />
+      </div>
+    );
+  }
+
+  const asOf = todayISO();
+  let interestDue = 0, outstanding = 0;
+  items.forEach((item) => {
+    const state = computeItemState(item, receipts.filter((r) => r.itemId === item.id), asOf);
+    outstanding += state.balance;
+    if (!state.isClosed) interestDue += state.unpaidInterest;
+  });
+
+  return (
+    <div>
+      <button onClick={onBack} className="text-xs text-[var(--ink-soft)] flex items-center gap-1 mb-3"><ArrowLeft size={13} /> Back to Admin</button>
+      <h2 className="font-display text-xl mb-1">{tenant.business_name}</h2>
+      <p className="text-xs text-[var(--ink-soft)] font-body mb-6">{tenant.email || "—"} · {tenant.contact_no || "no contact"} · Read-only view</p>
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-8">
+        <div className="bg-white rounded-lg p-4 border border-[var(--line)]"><div className="text-[11px] font-body text-[var(--ink-soft)] mb-1.5">Outstanding principal</div><div className="font-display text-2xl tabnum">{inr(outstanding)}</div></div>
+        <div className="bg-white rounded-lg p-4 border border-[var(--line)]"><div className="text-[11px] font-body text-[var(--ink-soft)] mb-1.5">Interest due</div><div className="font-display text-2xl tabnum text-[var(--red)]">{inr(interestDue)}</div></div>
+        <div className="bg-white rounded-lg p-4 border border-[var(--line)]"><div className="text-[11px] font-body text-[var(--ink-soft)] mb-1.5">Customers</div><div className="font-display text-2xl tabnum">{customers.length}</div></div>
+      </div>
+      <h3 className="font-display text-base mb-2">Customers</h3>
+      <div className="grid sm:grid-cols-2 gap-2">
+        {customers.map((c) => (
+          <button key={c.id} onClick={() => setSelectedCustomerId(c.id)} className="text-left bg-white border border-[var(--line)] rounded-lg p-3 text-sm font-body hover:bg-[var(--paper-dim)]">
+            {c.name} <span className="text-[var(--ink-soft)] text-xs">· {c.mobile}</span>
+          </button>
         ))}
+        {customers.length === 0 && <p className="text-sm text-[var(--ink-soft)] font-body">No customers yet.</p>}
       </div>
     </div>
   );
