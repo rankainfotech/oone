@@ -56,24 +56,32 @@ function interestForPeriod(principal, ratePA, days, type) {
 }
 
 // Simulate an item's payoff history; also tags each receipt with shortfall/excess
-function computeItemState(item, itemReceipts, asOfISO) {
-  const sorted = [...itemReceipts].sort((a, b) => (a.date < b.date ? -1 : 1));
-  let balance = item.principal;
+function computeItemState(item, itemReceipts, asOfISO, itemTopups = []) {
+  const events = [
+    { date: item.date, type: "principal", amount: item.principal },
+    ...itemTopups.map((t) => ({ date: t.date, type: "principal", amount: t.amount, topupId: t.id })),
+    ...itemReceipts.map((r) => ({ date: r.date, type: "receipt", principalPaid: r.principalPaid, interestPaid: r.interestPaid, id: r.id })),
+  ].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (a.type === "receipt" ? 1 : -1)));
+
+  let balance = 0;
   let unpaidInterest = 0;
-  let lastDate = item.date;
+  let lastDate = events[0]?.date || item.date;
   const receiptTags = [];
 
-  for (const r of sorted) {
-    if (r.date > asOfISO) continue;
-    const days = daysBetween(lastDate, r.date);
-    const accrued = interestForPeriod(balance, item.rate, days, item.interestType);
-    unpaidInterest += accrued;
-    const dueBeforePayment = unpaidInterest;
-    const diff = (r.interestPaid || 0) - dueBeforePayment;
-    receiptTags.push({ receiptId: r.id, shortfall: diff < -1 ? -diff : 0, excess: diff > 1 ? diff : 0 });
-    unpaidInterest -= r.interestPaid || 0;
-    balance -= r.principalPaid || 0;
-    lastDate = r.date;
+  for (const ev of events) {
+    if (ev.date > asOfISO) continue;
+    const days = daysBetween(lastDate, ev.date);
+    unpaidInterest += interestForPeriod(balance, item.rate, days, item.interestType);
+    if (ev.type === "principal") {
+      balance += ev.amount;
+    } else {
+      const dueBeforePayment = unpaidInterest;
+      const diff = (ev.interestPaid || 0) - dueBeforePayment;
+      receiptTags.push({ receiptId: ev.id, shortfall: diff < -1 ? -diff : 0, excess: diff > 1 ? diff : 0 });
+      unpaidInterest -= ev.interestPaid || 0;
+      balance -= ev.principalPaid || 0;
+    }
+    lastDate = ev.date;
   }
   const tailDays = daysBetween(lastDate, asOfISO);
   if (tailDays > 0 && balance > 0.005) {
@@ -177,6 +185,7 @@ const mapCustomer = (r) => ({
 });
 const mapItem = (r) => ({ id: r.id, customerId: r.customer_id, date: r.date, principal: Number(r.principal), description: r.description, photo: r.photo, rate: Number(r.rate), interestType: r.interest_type, paymentMode: r.payment_mode, bankAccountId: r.bank_account_id });
 const mapReceipt = (r) => ({ id: r.id, itemId: r.item_id, customerId: r.customer_id, date: r.date, principalPaid: Number(r.principal_paid), interestPaid: Number(r.interest_paid), paymentMode: r.payment_mode, bankAccountId: r.bank_account_id });
+const mapTopup = (r) => ({ id: r.id, itemId: r.item_id, customerId: r.customer_id, date: r.date, amount: Number(r.amount), paymentMode: r.payment_mode, bankAccountId: r.bank_account_id });
 const mapBank = (r) => ({ id: r.id, bankName: r.bank_name, accountNumber: r.account_number, ifsc: r.ifsc, branch: r.branch });
 const mapTenant = (r) => ({
   id: r.id, businessName: r.business_name, status: r.status, isPaid: r.is_paid, logo: r.logo, validUntil: r.valid_until,
@@ -192,17 +201,25 @@ function addressString(o) {
 async function fetchCustomers() { const { data, error } = await supabase.from("customers").select("*").order("name"); if (error) throw error; return data.map(mapCustomer); }
 async function fetchItems() { const { data, error } = await supabase.from("items").select("*"); if (error) throw error; return data.map(mapItem); }
 async function fetchReceipts() { const { data, error } = await supabase.from("receipts").select("*"); if (error) throw error; return data.map(mapReceipt); }
+async function fetchTopups() { const { data, error } = await supabase.from("item_topups").select("*"); if (error) throw error; return data.map(mapTopup); }
+async function insertTopup(t) {
+  const row = { item_id: t.itemId, customer_id: t.customerId, date: t.date, amount: t.amount, payment_mode: t.paymentMode || "cash", bank_account_id: t.bankAccountId || null };
+  const { error } = await supabase.from("item_topups").insert(row);
+  if (error) throw error;
+}
+async function deleteTopupRow(id) { const { error } = await supabase.from("item_topups").delete().eq("id", id); if (error) throw error; }
 async function fetchBankAccounts() { const { data, error } = await supabase.from("bank_accounts").select("*").order("bank_name"); if (error) throw error; return data.map(mapBank); }
 
 // Explicit tenant_id filters — used only by Super Admin's read-only company drill-down
 async function fetchTenantScoped(tenantId) {
-  const [{ data: c, error: e1 }, { data: i, error: e2 }, { data: r, error: e3 }] = await Promise.all([
+  const [{ data: c, error: e1 }, { data: i, error: e2 }, { data: r, error: e3 }, { data: tu, error: e4 }] = await Promise.all([
     supabase.from("customers").select("*").eq("tenant_id", tenantId),
     supabase.from("items").select("*").eq("tenant_id", tenantId),
     supabase.from("receipts").select("*").eq("tenant_id", tenantId),
+    supabase.from("item_topups").select("*").eq("tenant_id", tenantId),
   ]);
-  if (e1) throw e1; if (e2) throw e2; if (e3) throw e3;
-  return { customers: c.map(mapCustomer), items: i.map(mapItem), receipts: r.map(mapReceipt) };
+  if (e1) throw e1; if (e2) throw e2; if (e3) throw e3; if (e4) throw e4;
+  return { customers: c.map(mapCustomer), items: i.map(mapItem), receipts: r.map(mapReceipt), topups: tu.map(mapTopup) };
 }
 
 async function findCustomerByMobile(mobile, excludeId) {
@@ -243,9 +260,12 @@ async function updateItemRow(id, item) {
   if (error) throw error;
 }
 async function deleteItemSafely(id) {
-  const { data, error } = await supabase.from("receipts").select("id").eq("item_id", id).limit(1);
-  if (error) throw error;
-  if (data.length > 0) return { blocked: true };
+  const [{ data: r, error: e1 }, { data: tu, error: e2 }] = await Promise.all([
+    supabase.from("receipts").select("id").eq("item_id", id).limit(1),
+    supabase.from("item_topups").select("id").eq("item_id", id).limit(1),
+  ]);
+  if (e1) throw e1; if (e2) throw e2;
+  if (r.length > 0 || tu.length > 0) return { blocked: true };
   const { error: delErr } = await supabase.from("items").delete().eq("id", id);
   if (delErr) throw delErr;
   return { blocked: false };
@@ -315,7 +335,9 @@ export default function App() {
   const [items, setItems] = useState([]);
   const [receipts, setReceipts] = useState([]);
   const [bankAccounts, setBankAccounts] = useState([]);
+  const [topups, setTopups] = useState([]);
   const [selectedCustomerId, setSelectedCustomerId] = useState(null);
+  const [selectedBankId, setSelectedBankId] = useState(null);
   const [editCustomer, setEditCustomer] = useState(null);
   const [editItem, setEditItem] = useState(null);
   const [editReceipt, setEditReceipt] = useState(null);
@@ -342,8 +364,8 @@ export default function App() {
   }, [session]);
 
   const loadAll = async () => {
-    const [c, i, r, b] = await Promise.all([fetchCustomers(), fetchItems(), fetchReceipts(), fetchBankAccounts()]);
-    setCustomers(c); setItems(i); setReceipts(r); setBankAccounts(b);
+    const [c, i, r, b, tu] = await Promise.all([fetchCustomers(), fetchItems(), fetchReceipts(), fetchBankAccounts(), fetchTopups()]);
+    setCustomers(c); setItems(i); setReceipts(r); setBankAccounts(b); setTopups(tu);
   };
   const reloadTenant = async () => {
     const { data } = await supabase.from("tenants").select("*").eq("id", tenant.id).single();
@@ -403,7 +425,7 @@ export default function App() {
             </div>
           )}
           {screen === "dashboard" && (
-            <Dashboard customers={customers} items={items} receipts={receipts} bankAccounts={bankAccounts} openLedger={openLedger} onOpenLightbox={setLightboxUrl} />
+            <Dashboard customers={customers} items={items} receipts={receipts} topups={topups} bankAccounts={bankAccounts} openLedger={openLedger} onOpenLightbox={setLightboxUrl} onOpenBankLedger={(id) => { setSelectedBankId(id); setScreen("bankLedger"); }} />
           )}
           {screen === "customers" && (
             <CustomersScreen customers={customers} items={items}
@@ -425,47 +447,63 @@ export default function App() {
               }} />
           )}
           {screen === "payment" && (
-            <PaymentEntry customers={customers} bankAccounts={bankAccounts} existing={editItem}
+            <PaymentEntry customers={customers} items={items} receipts={receipts} topups={topups} bankAccounts={bankAccounts} existing={editItem}
               onSaveCustomer={async (c) => { const id = await upsertCustomer(c); await loadAll(); return id; }}
               onSave={async (item) => {
                 if (!editItem && blockIfExpired()) return;
                 if (editItem) await updateItemRow(editItem.id, item); else await insertItem(item);
                 await loadAll(); showToast(editItem ? "Loan updated" : "Payment (loan) recorded");
                 setEditItem(null); setScreen(editItem ? "ledger" : "dashboard");
-              }} />
+              }}
+              onSaveTopup={async (t) => {
+                if (blockIfExpired()) return;
+                await insertTopup(t); await loadAll(); showToast("Additional amount recorded against the item");
+                setScreen("dashboard");
+              }}
+              businessName={tenant.businessName} />
           )}
           {screen === "receipt" && (
-            <ReceiptEntry customers={customers} items={items} receipts={receipts} bankAccounts={bankAccounts} existing={editReceipt}
+            <ReceiptEntry customers={customers} items={items} receipts={receipts} topups={topups} bankAccounts={bankAccounts} existing={editReceipt}
               onSave={async (r) => {
                 if (!editReceipt && blockIfExpired()) return;
                 if (editReceipt) await updateReceiptRow(editReceipt.id, r); else await insertReceipt(r);
                 await loadAll(); showToast(editReceipt ? "Receipt updated" : "Receipt recorded");
                 setEditReceipt(null); setScreen(editReceipt ? "ledger" : "dashboard");
-              }} />
+              }}
+              businessName={tenant.businessName} />
           )}
           {screen === "ledger" && (
-            <LedgerScreen customers={customers} items={items} receipts={receipts}
+            <LedgerScreen customers={customers} items={items} receipts={receipts} topups={topups}
               selectedCustomerId={selectedCustomerId} setSelectedCustomerId={setSelectedCustomerId}
               onOpenLightbox={setLightboxUrl}
               onEditItem={(it) => { setEditItem(it); setScreen("payment"); }}
               onDeleteItem={async (it) => {
                 if (!window.confirm("Delete this loan entry? This cannot be undone.")) return;
                 const res = await deleteItemSafely(it.id);
-                if (res.blocked) { showToast("There are receipts recorded against this item. Delete those first."); return; }
+                if (res.blocked) { showToast("There are receipts or additional amounts recorded against this item. Delete those first."); return; }
                 await loadAll(); showToast("Loan entry deleted");
               }}
               onEditReceipt={(r) => { setEditReceipt(r); setScreen("receipt"); }}
               onDeleteReceipt={async (r) => {
                 if (!window.confirm("Delete this receipt entry? This cannot be undone.")) return;
                 await deleteReceiptRow(r.id); await loadAll(); showToast("Receipt deleted");
+              }}
+              onDeleteTopup={async (t) => {
+                if (!window.confirm("Delete this additional-amount entry? This cannot be undone.")) return;
+                await deleteTopupRow(t.id); await loadAll(); showToast("Entry deleted");
               }} />
           )}
-          {screen === "reports" && <ReportsScreen customers={customers} items={items} receipts={receipts} openLedger={openLedger} />}
+          {screen === "reports" && <ReportsScreen customers={customers} items={items} receipts={receipts} topups={topups} openLedger={openLedger} />}
           {screen === "profile" && (
             <ProfileScreen tenant={tenant} bankAccounts={bankAccounts} customers={customers} items={items} receipts={receipts}
               onSaveTenant={async (t) => { try { await updateTenantRow(tenant.id, t); await reloadTenant(); showToast("Company profile saved"); } catch (e) { showToast("Could not save: " + e.message); } }}
               onAddBank={async (b) => { await upsertBankAccount({ ...b, tenantId: tenant.id }); await loadAll(); showToast("Bank account saved"); }}
-              onDeleteBank={async (id) => { try { await deleteBankAccount(id); await loadAll(); showToast("Bank account removed"); } catch (e) { showToast("Could not remove: " + e.message); } }} />
+              onDeleteBank={async (id) => { try { await deleteBankAccount(id); await loadAll(); showToast("Bank account removed"); } catch (e) { showToast("Could not remove: " + e.message); } }}
+              onOpenBankLedger={(id) => { setSelectedBankId(id); setScreen("bankLedger"); }} />
+          )}
+          {screen === "bankLedger" && selectedBankId && (
+            <BankLedgerScreen bank={bankAccounts.find((b) => b.id === selectedBankId)} items={items} receipts={receipts} customers={customers}
+              onBack={() => setScreen("profile")} />
           )}
           {screen === "admin" && profile.is_super_admin && <AdminScreen />}
         </main>
@@ -612,8 +650,8 @@ function ResetPasswordScreen({ onDone }) {
 function Sidebar({ navItems, screen, setScreen, onLogout, tenantLogo }) {
   return (
     <div className="hidden md:flex fixed left-0 top-0 bottom-0 z-40 w-56 bg-white border-r border-[var(--line)] flex-col">
-      <div className="h-20 flex items-center px-5 border-b border-[var(--line)]">
-        <img src={tenantLogo || LOGO_DATA_URI} alt="Logo" className="h-12 max-w-full object-contain" />
+      <div className="h-24 flex items-center px-5 border-b border-[var(--line)]">
+        <img src={tenantLogo || LOGO_DATA_URI} alt="Logo" className="max-h-20 max-w-[190px] object-contain" />
       </div>
       <nav className="flex-1 py-3">
         {navItems.map(({ id, label, icon: Icon }) => (
@@ -656,7 +694,7 @@ function MobileTopBar({ tenantLogo, businessName, extraItems, screen, setScreen,
   return (
     <div className="md:hidden sticky top-0 z-30 bg-white/95 backdrop-blur border-b border-[var(--line)]">
       <div className="h-16 flex items-center px-4 gap-2">
-        <img src={tenantLogo || LOGO_DATA_URI} alt="Logo" className="h-9 object-contain" />
+        <img src={tenantLogo || LOGO_DATA_URI} alt="Logo" className="h-14 max-w-[140px] object-contain" />
         <span className="font-display text-base truncate flex-1">{businessName}</span>
         <button onClick={() => setOpen((o) => !o)} className="text-[var(--ink-soft)] p-1"><UserCog size={20} /></button>
       </div>
@@ -720,7 +758,7 @@ function PeriodBar({ period }) {
 }
 
 /* ---------------- Dashboard ---------------- */
-function Dashboard({ customers, items, receipts, bankAccounts, openLedger, onOpenLightbox }) {
+function Dashboard({ customers, items, receipts, topups, bankAccounts, openLedger, onOpenLightbox, onOpenBankLedger }) {
   const period = usePeriod();
   const { start, end } = period;
   const asOfClamped = end > todayISO() ? todayISO() : end;
@@ -737,7 +775,7 @@ function Dashboard({ customers, items, receipts, bankAccounts, openLedger, onOpe
     for (const item of items) {
       const itemReceipts = receipts.filter((r) => r.itemId === item.id);
       if (item.date >= start && item.date <= end) totalLentInPeriod += item.principal;
-      const state = computeItemState(item, itemReceipts, asOfClamped);
+      const state = computeItemState(item, itemReceipts, asOfClamped, topups.filter((t) => t.itemId === item.id));
       outstandingPrincipal += state.balance;
       if (!state.isClosed && state.unpaidInterest > 1) {
         dueByCustomer[item.customerId] = (dueByCustomer[item.customerId] || 0) + state.unpaidInterest;
@@ -790,9 +828,9 @@ function Dashboard({ customers, items, receipts, bankAccounts, openLedger, onOpe
       {bankAccounts.length > 0 && (
         <div className="flex flex-wrap gap-2 mb-8">
           {bankAccounts.map((b) => (
-            <div key={b.id} className="text-xs font-body bg-[var(--paper-dim)] rounded-full px-3 py-1.5">
+            <button key={b.id} onClick={() => onOpenBankLedger(b.id)} className="text-xs font-body bg-[var(--paper-dim)] hover:bg-[var(--line)] rounded-full px-3 py-1.5 transition-colors">
               {b.bankName} ({b.accountNumber.slice(-4)}): <b className="tabnum">{inr(stats.byBankAccount[b.id] || 0)}</b>
-            </div>
+            </button>
           ))}
         </div>
       )}
@@ -977,9 +1015,11 @@ function ModeSelect({ mode, setMode, bankAccountId, setBankAccountId, bankAccoun
 }
 
 /* ---------------- Payment (loan) entry ---------------- */
-function PaymentEntry({ customers, bankAccounts, existing, onSaveCustomer, onSave }) {
+function PaymentEntry({ customers, items, receipts, topups, bankAccounts, existing, onSaveCustomer, onSave, onSaveTopup, businessName }) {
   const isEdit = !!existing;
+  const [entryMode, setEntryMode] = useState("new"); // 'new' | 'topup'
   const [customerId, setCustomerId] = useState(existing?.customerId || "");
+  const [topupItemId, setTopupItemId] = useState("");
   const [creatingNew, setCreatingNew] = useState(false);
   const [newCust, setNewCust] = useState(emptyCustomer());
   const [mobileErr, setMobileErr] = useState("");
@@ -991,38 +1031,72 @@ function PaymentEntry({ customers, bankAccounts, existing, onSaveCustomer, onSav
   const [bankAccountId, setBankAccountId] = useState(existing?.bankAccountId || "");
   const [saving, setSaving] = useState(false);
 
+  const customerActiveItems = useMemo(() => {
+    return items.filter((i) => i.customerId === customerId).map((i) => ({
+      item: i,
+      state: computeItemState(i, receipts.filter((r) => r.itemId === i.id), todayISO(), topups.filter((t) => t.itemId === i.id)),
+    })).filter((x) => !x.state.isClosed);
+  }, [customerId, items, receipts, topups]);
+
+  const selectedTopupInfo = useMemo(() => {
+    return customerActiveItems.find((x) => x.item.id === topupItemId) || null;
+  }, [topupItemId, customerActiveItems]);
+
   const submit = async () => {
+    const waWindow = isEdit ? null : window.open("", "_blank");
     setSaving(true);
     try {
+      if (!isEdit && entryMode === "topup") {
+        if (!topupItemId || !amount) { waWindow?.close(); setSaving(false); return; }
+        const cust = customers.find((c) => c.id === customerId);
+        await onSaveTopup({ itemId: topupItemId, customerId, date, amount: parseFloat(amount), paymentMode: mode, bankAccountId: mode === "bank" ? bankAccountId || null : null });
+        if (waWindow && cust?.mobile) {
+          waWindow.location.href = waLink(cust.mobile, `Hi ${cust.name}, this confirms we have paid you an additional ${inr(parseFloat(amount))} today against your existing mortgaged item. Thank you — ${businessName || "OONE"}.`);
+        } else waWindow?.close();
+        return;
+      }
       let custId = customerId;
       let rate = customers.find((c) => c.id === custId)?.rate ?? 24;
       let interestType = customers.find((c) => c.id === custId)?.interestType ?? "simple";
+      let custMobile = customers.find((c) => c.id === custId)?.mobile;
+      let custName = customers.find((c) => c.id === custId)?.name;
       if (creatingNew) {
-        if (!newCust.name.trim() || !newCust.mobile.trim()) { setSaving(false); return; }
+        if (!newCust.name.trim() || !newCust.mobile.trim()) { waWindow?.close(); setSaving(false); return; }
         const dupe = await findCustomerByMobile(newCust.mobile, null);
-        if (dupe) { setMobileErr(`This number is already used by ${dupe.name}.`); setSaving(false); return; }
+        if (dupe) { setMobileErr(`This number is already used by ${dupe.name}.`); waWindow?.close(); setSaving(false); return; }
         custId = await onSaveCustomer(newCust);
         rate = newCust.rate; interestType = newCust.interestType;
+        custMobile = newCust.mobile; custName = newCust.name;
       }
-      if (!custId || !amount) { setSaving(false); return; }
+      if (!custId || !amount) { waWindow?.close(); setSaving(false); return; }
       await onSave({ customerId: custId, date, principal: parseFloat(amount), description: desc, photo, rate, interestType, paymentMode: mode, bankAccountId: mode === "bank" ? bankAccountId || null : null });
-    } finally { setSaving(false); }
+      if (waWindow && custMobile) {
+        waWindow.location.href = waLink(custMobile, `Hi ${custName}, this confirms we have paid you ${inr(parseFloat(amount))} today against "${desc || "your mortgaged item"}". Thank you — ${businessName || "OONE"}.`);
+      } else waWindow?.close();
+    } catch (e) { waWindow?.close(); throw e; }
+    finally { setSaving(false); }
   };
 
   return (
     <div className="max-w-lg">
       <h2 className="font-display text-xl mb-4">{isEdit ? "Edit payment" : "New payment — money lent"}</h2>
       <div className="bg-white border border-[var(--line)] rounded-lg p-5 space-y-4">
+        {!isEdit && (
+          <div className="flex gap-4 text-sm font-body border-b border-[var(--line)] pb-3">
+            <button onClick={() => { setEntryMode("new"); setCreatingNew(false); }} className={entryMode === "new" ? "font-semibold border-b-2 border-[var(--ink)]" : "text-[var(--ink-soft)]"}>New mortgage</button>
+            <button onClick={() => { setEntryMode("topup"); setCreatingNew(false); }} className={entryMode === "topup" ? "font-semibold border-b-2 border-[var(--ink)]" : "text-[var(--ink-soft)]"}>Additional amount on existing item</button>
+          </div>
+        )}
         <Field label="Date"><input type="date" className={inputCls} value={date} onChange={e => setDate(e.target.value)} /></Field>
         {isEdit ? (
           <div className="bg-[var(--paper-dim)] rounded-md p-3 text-sm font-body">{customers.find((c) => c.id === customerId)?.name}</div>
         ) : !creatingNew ? (
           <Field label="Customer">
-            <select className={inputCls} value={customerId} onChange={e => setCustomerId(e.target.value)}>
+            <select className={inputCls} value={customerId} onChange={e => { setCustomerId(e.target.value); setTopupItemId(""); }}>
               <option value="">Select existing customer…</option>
               {customers.map((c) => <option key={c.id} value={c.id}>{c.name} · {c.mobile}</option>)}
             </select>
-            <button onClick={() => setCreatingNew(true)} className="text-xs font-body text-[var(--ink)] underline font-medium mt-2 flex items-center gap-1"><Plus size={12} /> Create new customer instead</button>
+            {entryMode === "new" && <button onClick={() => setCreatingNew(true)} className="text-xs font-body text-[var(--ink)] underline font-medium mt-2 flex items-center gap-1"><Plus size={12} /> Create new customer instead</button>}
           </Field>
         ) : (
           <div className="bg-[var(--paper-dim)] rounded-md p-3 space-y-3">
@@ -1038,18 +1112,57 @@ function PaymentEntry({ customers, bankAccounts, existing, onSaveCustomer, onSav
             </div>
           </div>
         )}
-        <Field label="Amount paid to customer (₹)"><input type="number" className={inputCls} value={amount} onChange={e => setAmount(e.target.value)} /></Field>
+
+        {!isEdit && entryMode === "topup" && customerId && (
+          <Field label="Which mortgaged item">
+            <select className={inputCls} value={topupItemId} onChange={e => setTopupItemId(e.target.value)}>
+              <option value="">Select an active item…</option>
+              {customerActiveItems.map(({ item }) => <option key={item.id} value={item.id}>{item.description || "Item"} — lent {inr(item.principal)} on {item.date}</option>)}
+            </select>
+            {customerActiveItems.length === 0 && <p className="text-[10px] text-[var(--ink-soft)] mt-1">This customer has no active (unredeemed) items to add to.</p>}
+          </Field>
+        )}
+
+        {selectedTopupInfo && (() => {
+          const { item, state } = selectedTopupInfo;
+          const totalExposure = state.balance + state.unpaidInterest;
+          const daysSinceStart = Math.max(1, daysBetween(item.date, todayISO()));
+          const effectiveRate = state.balance > 0 ? (state.unpaidInterest / state.balance) * (365 / daysSinceStart) * 100 : 0;
+          const newAmt = parseFloat(amount) || 0;
+          return (
+            <div className="bg-[var(--paper-dim)] rounded-md p-3 text-xs font-body space-y-1.5">
+              <p className="font-medium mb-1">Feasibility snapshot — decide if lending more makes sense</p>
+              <div className="flex justify-between"><span>Outstanding principal</span><b className="tabnum">{inr(state.balance)}</b></div>
+              <div className="flex justify-between"><span>Unpaid interest to date</span><b className="tabnum text-[var(--red)]">{inr(state.unpaidInterest)}</b></div>
+              <div className="flex justify-between border-t border-[var(--line)] pt-1"><span>Total current exposure</span><b className="tabnum">{inr(totalExposure)}</b></div>
+              <div className="flex justify-between"><span>Contracted rate</span><b className="tabnum">{item.rate}% p.a.</b></div>
+              <div className="flex justify-between"><span>Effective rate accrued so far</span><b className="tabnum">{effectiveRate.toFixed(1)}% p.a.</b></div>
+              {newAmt > 0 && <div className="flex justify-between border-t border-[var(--line)] pt-1"><span>Exposure after this top-up</span><b className="tabnum">{inr(totalExposure + newAmt)}</b></div>}
+              <p className="text-[10px] text-[var(--ink-soft)] pt-1">This doesn't know the item's collateral value — use it alongside your own judgement of what the item is worth.</p>
+            </div>
+          );
+        })()}
+
+        <Field label={entryMode === "topup" ? "Additional amount paid to customer (₹)" : "Amount paid to customer (₹)"}>
+          <input type="number" className={inputCls} value={amount} onChange={e => setAmount(e.target.value)} />
+        </Field>
         <ModeSelect mode={mode} setMode={setMode} bankAccountId={bankAccountId} setBankAccountId={setBankAccountId} bankAccounts={bankAccounts} />
-        <Field label="Description of mortgaged item"><textarea rows={2} className={inputCls} value={desc} onChange={e => setDesc(e.target.value)} placeholder="e.g. Gold chain, 22K, ~18g" /></Field>
-        <PhotoPicker label="Photo of mortgaged item" value={photo} onChange={setPhoto} />
-        <button disabled={saving} onClick={submit} className="w-full bg-[var(--ink)] disabled:opacity-50 text-white rounded py-2.5 font-body font-medium text-sm">{saving ? "Saving…" : isEdit ? "Save changes" : "Record payment"}</button>
+        {entryMode === "new" && (
+          <>
+            <Field label="Description of mortgaged item"><textarea rows={2} className={inputCls} value={desc} onChange={e => setDesc(e.target.value)} placeholder="e.g. Gold chain, 22K, ~18g" /></Field>
+            <PhotoPicker label="Photo of mortgaged item" value={photo} onChange={setPhoto} />
+          </>
+        )}
+        <button disabled={saving} onClick={submit} className="w-full bg-[var(--ink)] disabled:opacity-50 text-white rounded py-2.5 font-body font-medium text-sm">
+          {saving ? "Saving…" : isEdit ? "Save changes" : entryMode === "topup" ? "Record additional amount" : "Record payment"}
+        </button>
       </div>
     </div>
   );
 }
 
 /* ---------------- Receipt entry ---------------- */
-function ReceiptEntry({ customers, items, receipts, bankAccounts, existing, onSave }) {
+function ReceiptEntry({ customers, items, receipts, topups, bankAccounts, existing, onSave, businessName }) {
   const isEdit = !!existing;
   const [customerId, setCustomerId] = useState(existing?.customerId || "");
   const [itemId, setItemId] = useState(existing?.itemId || "");
@@ -1065,13 +1178,22 @@ function ReceiptEntry({ customers, items, receipts, bankAccounts, existing, onSa
     const item = items.find((i) => i.id === itemId);
     if (!item) return null;
     const relevantReceipts = receipts.filter((r) => r.itemId === item.id && (!isEdit || r.id !== existing.id));
-    return computeItemState(item, relevantReceipts, date);
-  }, [itemId, items, receipts, date]);
+    const relevantTopups = topups.filter((t) => t.itemId === item.id);
+    return computeItemState(item, relevantReceipts, date, relevantTopups);
+  }, [itemId, items, receipts, topups, date]);
 
   const submit = async () => {
     if (!itemId || (!principalPaid && !interestPaid)) return;
+    const waWindow = isEdit ? null : window.open("", "_blank");
     setSaving(true);
-    try { await onSave({ itemId, customerId, date, principalPaid: parseFloat(principalPaid) || 0, interestPaid: parseFloat(interestPaid) || 0, paymentMode: mode, bankAccountId: mode === "bank" ? bankAccountId || null : null }); }
+    try {
+      await onSave({ itemId, customerId, date, principalPaid: parseFloat(principalPaid) || 0, interestPaid: parseFloat(interestPaid) || 0, paymentMode: mode, bankAccountId: mode === "bank" ? bankAccountId || null : null });
+      const cust = customers.find((c) => c.id === customerId);
+      const total = (parseFloat(principalPaid) || 0) + (parseFloat(interestPaid) || 0);
+      if (waWindow && cust?.mobile) {
+        waWindow.location.href = waLink(cust.mobile, `Hi ${cust.name}, this confirms we have received ${inr(total)} from you today (Principal: ${inr(parseFloat(principalPaid) || 0)}, Interest: ${inr(parseFloat(interestPaid) || 0)}). Thank you — ${businessName || "OONE"}.`);
+      } else waWindow?.close();
+    } catch (e) { waWindow?.close(); throw e; }
     finally { setSaving(false); }
   };
 
@@ -1119,7 +1241,7 @@ function ReceiptEntry({ customers, items, receipts, bankAccounts, existing, onSa
 }
 
 /* ---------------- Ledger ---------------- */
-function LedgerScreen({ customers, items, receipts, selectedCustomerId, setSelectedCustomerId, onOpenLightbox, onEditItem, onDeleteItem, onEditReceipt, onDeleteReceipt, readOnly }) {
+function LedgerScreen({ customers, items, receipts, topups = [], selectedCustomerId, setSelectedCustomerId, onOpenLightbox, onEditItem, onDeleteItem, onEditReceipt, onDeleteReceipt, onDeleteTopup, readOnly }) {
   const customer = customers.find((c) => c.id === selectedCustomerId);
   const period = usePeriod();
   if (!customer) {
@@ -1135,13 +1257,18 @@ function LedgerScreen({ customers, items, receipts, selectedCustomerId, setSelec
   const { start, end } = period;
   const asOf = end > todayISO() ? todayISO() : end;
   const custItems = items.filter((i) => i.customerId === customer.id).sort((a, b) => (a.date < b.date ? 1 : -1));
-  const dueTotal = custItems.reduce((s, it) => s + computeItemState(it, receipts.filter((r) => r.itemId === it.id), asOf).unpaidInterest, 0);
+  const itemTopups = (itemId) => topups.filter((t) => t.itemId === itemId);
+  const dueTotal = custItems.reduce((s, it) => s + computeItemState(it, receipts.filter((r) => r.itemId === it.id), asOf, itemTopups(it.id)).unpaidInterest, 0);
 
   const rows = [];
   for (const item of custItems) {
     const itemReceipts = receipts.filter((r) => r.itemId === item.id);
-    const state = computeItemState(item, itemReceipts, asOf);
+    const tItemTopups = itemTopups(item.id);
+    const state = computeItemState(item, itemReceipts, asOf, tItemTopups);
     if (item.date >= start && item.date <= end) rows.push({ type: "loan", date: item.date, desc: item.description || "Mortgaged item", amount: item.principal, item });
+    tItemTopups.filter((t) => t.date >= start && t.date <= end).forEach((t) => {
+      rows.push({ type: "topup", date: t.date, desc: `Additional amount — ${item.description || "item"}`, amount: t.amount, topup: t, item });
+    });
     itemReceipts.filter((r) => r.date >= start && r.date <= end).forEach((r) => {
       const tag = state.receiptTags.find((t) => t.receiptId === r.id);
       rows.push({ type: "receipt", date: r.date, desc: `Receipt — ${item.description || "item"}`, principalPaid: r.principalPaid, interestPaid: r.interestPaid, receipt: r, item, shortfall: tag?.shortfall || 0, excess: tag?.excess || 0 });
@@ -1171,7 +1298,7 @@ function LedgerScreen({ customers, items, receipts, selectedCustomerId, setSelec
       </div>
 
       {custItems.map((item) => {
-        const state = computeItemState(item, receipts.filter((r) => r.itemId === item.id), asOf);
+        const state = computeItemState(item, receipts.filter((r) => r.itemId === item.id), asOf, itemTopups(item.id));
         return (
           <div key={item.id} className="mb-4 bg-white border border-[var(--line)] rounded-lg overflow-hidden">
             <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--line)]">
@@ -1202,22 +1329,25 @@ function LedgerScreen({ customers, items, receipts, selectedCustomerId, setSelec
           <thead><tr className="text-left text-xs text-[var(--ink-soft)] ledger-rule"><th className="py-2 pr-2">Date</th><th className="py-2 pr-2">Description</th><th className="py-2 pr-2 text-right">Principal</th><th className="py-2 pr-2 text-right">Interest</th><th className="py-2 pr-2"></th></tr></thead>
           <tbody>
             {rows.map((r, idx) => (
-              <tr key={idx} className={`ledger-rule border-l-4 ${r.type === "loan" ? "border-l-[var(--brass)]" : "border-l-[var(--green)]"}`}>
+              <tr key={idx} className={`ledger-rule border-l-4 ${r.type === "receipt" ? "border-l-[var(--green)]" : "border-l-[var(--brass)]"}`}>
                 <td className="py-2 pr-2 whitespace-nowrap">{r.date}</td>
                 <td className="py-2 pr-2">
                   {r.desc}
                   {r.type === "receipt" && r.shortfall > 1 && <span className="ml-2 text-[10px] font-medium text-[var(--red)] bg-[var(--red)]/10 px-1.5 py-0.5 rounded">Short {inr(r.shortfall)}</span>}
                   {r.type === "receipt" && r.excess > 1 && <span className="ml-2 text-[10px] font-medium text-[var(--amber)] bg-yellow-50 px-1.5 py-0.5 rounded">Excess {inr(r.excess)}</span>}
                 </td>
-                <td className="py-2 pr-2 text-right tabnum">{r.type === "loan" ? inr(r.amount) : (r.principalPaid ? "-" + inr(r.principalPaid) : "—")}</td>
+                <td className="py-2 pr-2 text-right tabnum">{r.type === "receipt" ? (r.principalPaid ? "-" + inr(r.principalPaid) : "—") : inr(r.amount)}</td>
                 <td className="py-2 pr-2 text-right tabnum">{r.type === "receipt" && r.interestPaid ? "-" + inr(r.interestPaid) : "—"}</td>
                 <td className="py-2 pr-2 text-right whitespace-nowrap">
-                  {r.type === "receipt" && !readOnly ? (
+                  {r.type === "receipt" && !readOnly && (
                     <span className="inline-flex gap-2">
                       <button onClick={() => onEditReceipt(r.receipt)} className="text-[var(--ink-soft)] hover:text-[var(--ink)]"><Pencil size={13} /></button>
                       <button onClick={() => onDeleteReceipt(r.receipt)} className="text-[var(--ink-soft)] hover:text-[var(--red)]"><Trash2 size={13} /></button>
                     </span>
-                  ) : null}
+                  )}
+                  {r.type === "topup" && !readOnly && (
+                    <button onClick={() => onDeleteTopup(r.topup)} className="text-[var(--ink-soft)] hover:text-[var(--red)]"><Trash2 size={13} /></button>
+                  )}
                 </td>
               </tr>
             ))}
@@ -1229,7 +1359,7 @@ function LedgerScreen({ customers, items, receipts, selectedCustomerId, setSelec
 }
 
 /* ---------------- Reports (customer-wise) ---------------- */
-function ReportsScreen({ customers, items, receipts, openLedger }) {
+function ReportsScreen({ customers, items, receipts, topups, openLedger }) {
   const asOf = todayISO();
   const custName = (id) => customers.find((c) => c.id === id)?.name || "Unknown";
   const custMobile = (id) => customers.find((c) => c.id === id)?.mobile || "";
@@ -1238,7 +1368,7 @@ function ReportsScreen({ customers, items, receipts, openLedger }) {
   const staleByCustomer = {};
   for (const item of items) {
     const itemReceipts = receipts.filter((r) => r.itemId === item.id);
-    const state = computeItemState(item, itemReceipts, asOf);
+    const state = computeItemState(item, itemReceipts, asOf, topups.filter((t) => t.itemId === item.id));
     if (!state.isClosed) {
       if (state.unpaidInterest > 1) dueByCustomer[item.customerId] = (dueByCustomer[item.customerId] || 0) + state.unpaidInterest;
       const monthsSince = daysBetween(state.lastActivity, asOf) / 30;
@@ -1289,10 +1419,56 @@ function ReportsScreen({ customers, items, receipts, openLedger }) {
   );
 }
 
-/* ---------------- My Profile ---------------- */
-function ProfileScreen({ tenant, bankAccounts, customers, items, receipts, onSaveTenant, onAddBank, onDeleteBank }) {
+/* ---------------- Bank Ledger ---------------- */
+function BankLedgerScreen({ bank, items, receipts, customers, onBack }) {
+  const period = usePeriod();
+  const { start, end } = period;
+  const custName = (id) => customers.find((c) => c.id === id)?.name || "Unknown";
+
+  const rows = [];
+  items.filter((i) => i.bankAccountId === bank.id && i.date >= start && i.date <= end).forEach((i) => {
+    rows.push({ date: i.date, desc: `Loan to ${custName(i.customerId)} — ${i.description || "item"}`, out: i.principal, in: 0 });
+  });
+  receipts.filter((r) => r.bankAccountId === bank.id && r.date >= start && r.date <= end).forEach((r) => {
+    rows.push({ date: r.date, desc: `Receipt from ${custName(r.customerId)}`, out: 0, in: (r.principalPaid || 0) + (r.interestPaid || 0) });
+  });
+  rows.sort((a, b) => (a.date < b.date ? -1 : 1));
+  let running = 0;
+  const withBalance = rows.map((r) => { running += r.in - r.out; return { ...r, balance: running }; });
+
+  return (
+    <div>
+      <BackHeader title={`${bank.bankName} · ${bank.accountNumber}`} onBack={onBack} />
+      <PeriodBar period={period} />
+      <div className="bg-white border border-[var(--line)] rounded-lg p-4 mb-5 flex justify-between text-sm font-body">
+        <span className="text-[var(--ink-soft)]">Closing balance for this period</span>
+        <b className="tabnum">{inr(running)}</b>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm font-body">
+          <thead><tr className="text-left text-xs text-[var(--ink-soft)] ledger-rule"><th className="py-2 pr-2">Date</th><th className="py-2 pr-2">Description</th><th className="py-2 pr-2 text-right">In</th><th className="py-2 pr-2 text-right">Out</th><th className="py-2 pr-2 text-right">Balance</th></tr></thead>
+          <tbody>
+            {withBalance.map((r, idx) => (
+              <tr key={idx} className="ledger-rule">
+                <td className="py-2 pr-2 whitespace-nowrap">{r.date}</td>
+                <td className="py-2 pr-2">{r.desc}</td>
+                <td className="py-2 pr-2 text-right tabnum text-[var(--green-dark)]">{r.in ? inr(r.in) : "—"}</td>
+                <td className="py-2 pr-2 text-right tabnum text-[var(--red)]">{r.out ? inr(r.out) : "—"}</td>
+                <td className="py-2 pr-2 text-right tabnum">{inr(r.balance)}</td>
+              </tr>
+            ))}
+            {withBalance.length === 0 && <tr><td colSpan={5} className="py-6 text-center text-[var(--ink-soft)]">No transactions in this period.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function ProfileScreen({ tenant, bankAccounts, customers, items, receipts, onSaveTenant, onAddBank, onDeleteBank, onOpenBankLedger }) {
   const [t, setT] = useState(tenant);
   const [saving, setSaving] = useState(false);
+  const [addingBank, setAddingBank] = useState(false);
   const [newBank, setNewBank] = useState({ bankName: "", accountNumber: "", ifsc: "", branch: "" });
   const [bankErr, setBankErr] = useState("");
   useEffect(() => { setT(tenant); }, [tenant]);
@@ -1302,8 +1478,10 @@ function ProfileScreen({ tenant, bankAccounts, customers, items, receipts, onSav
   const addBank = async () => {
     setBankErr("");
     if (!newBank.bankName.trim() || !newBank.accountNumber.trim()) { setBankErr("Enter at least a bank name and account number."); return; }
+    setAddingBank(true);
     try { await onAddBank(newBank); setNewBank({ bankName: "", accountNumber: "", ifsc: "", branch: "" }); }
     catch (e) { setBankErr(e.message || "Could not save this bank account."); }
+    finally { setAddingBank(false); }
   };
 
   return (
@@ -1343,20 +1521,29 @@ function ProfileScreen({ tenant, bankAccounts, customers, items, receipts, onSav
       <div>
         <h3 className="font-display text-lg mb-3 flex items-center gap-2"><Building2 size={17} /> Bank accounts</h3>
         <div className="bg-white border border-[var(--line)] rounded-lg p-5 space-y-3">
+          {bankAccounts.length === 0 && <p className="text-xs text-[var(--ink-soft)] font-body">No bank accounts added yet — add one below to use "Bank" mode on payments and receipts.</p>}
           {bankAccounts.map((b) => (
             <div key={b.id} className="flex items-center justify-between border-b border-[var(--line)] pb-2 last:border-0 last:pb-0">
-              <div className="text-sm font-body">{b.bankName} · {b.accountNumber} <span className="text-[var(--ink-soft)] text-xs">{b.ifsc} {b.branch}</span></div>
+              <div>
+                <div className="text-sm font-body">{b.bankName} · {b.accountNumber} <span className="text-[var(--ink-soft)] text-xs">{b.ifsc} {b.branch}</span></div>
+                <button onClick={() => onOpenBankLedger(b.id)} className="text-xs font-body text-[var(--ink)] underline">View bank ledger</button>
+              </div>
               <button onClick={() => onDeleteBank(b.id)} className="text-[var(--ink-soft)] hover:text-[var(--red)]"><Trash2 size={14} /></button>
             </div>
           ))}
-          <div className="grid grid-cols-2 gap-2 pt-2">
-            <input placeholder="Bank name" className={inputCls} value={newBank.bankName} onChange={e => setNewBank({ ...newBank, bankName: e.target.value })} />
-            <input placeholder="Account number" className={inputCls} value={newBank.accountNumber} onChange={e => setNewBank({ ...newBank, accountNumber: e.target.value })} />
-            <input placeholder="IFSC" className={inputCls} value={newBank.ifsc} onChange={e => setNewBank({ ...newBank, ifsc: e.target.value })} />
-            <input placeholder="Branch" className={inputCls} value={newBank.branch} onChange={e => setNewBank({ ...newBank, branch: e.target.value })} />
+          <div className="pt-2 border-t border-[var(--line)]">
+            <p className="text-xs font-medium text-[var(--ink-soft)] mb-2 font-body">Add a new bank account</p>
+            <div className="grid grid-cols-2 gap-2">
+              <input placeholder="Bank name" className={inputCls} value={newBank.bankName} onChange={e => setNewBank({ ...newBank, bankName: e.target.value })} />
+              <input placeholder="Account number" className={inputCls} value={newBank.accountNumber} onChange={e => setNewBank({ ...newBank, accountNumber: e.target.value })} />
+              <input placeholder="IFSC" className={inputCls} value={newBank.ifsc} onChange={e => setNewBank({ ...newBank, ifsc: e.target.value })} />
+              <input placeholder="Branch" className={inputCls} value={newBank.branch} onChange={e => setNewBank({ ...newBank, branch: e.target.value })} />
+            </div>
+            {bankErr && <p className="text-[10px] text-[var(--red)] font-body mt-2">{bankErr}</p>}
+            <button disabled={addingBank} onClick={addBank} className="mt-3 bg-[var(--ink)] disabled:opacity-50 text-white rounded px-4 py-2 text-xs font-body font-medium flex items-center gap-1.5">
+              <Plus size={13} /> {addingBank ? "Saving…" : "Save this bank account"}
+            </button>
           </div>
-          {bankErr && <p className="text-[10px] text-[var(--red)] font-body">{bankErr}</p>}
-          <button onClick={addBank} className="text-xs font-body font-medium text-[var(--ink)] underline flex items-center gap-1"><Plus size={12} /> Add bank account</button>
         </div>
       </div>
 
@@ -1378,10 +1565,20 @@ function ProfileScreen({ tenant, bankAccounts, customers, items, receipts, onSav
 /* ---------------- Super Admin (platform owner) ---------------- */
 function AdminScreen() {
   const [tenants, setTenants] = useState(null);
+  const [txnCounts, setTxnCounts] = useState({});
   const [openTenantId, setOpenTenantId] = useState(null);
+  const [downloadingId, setDownloadingId] = useState(null);
+
   const load = async () => {
     const { data: t, error } = await supabase.from("tenants").select("*").order("created_at", { ascending: false });
     if (!error) setTenants(t);
+    const [{ data: i }, { data: r }] = await Promise.all([
+      supabase.from("items").select("tenant_id"),
+      supabase.from("receipts").select("tenant_id"),
+    ]);
+    const counts = {};
+    (i || []).concat(r || []).forEach((row) => { counts[row.tenant_id] = (counts[row.tenant_id] || 0) + 1; });
+    setTxnCounts(counts);
   };
   useEffect(() => { load(); }, []);
 
@@ -1389,13 +1586,60 @@ function AdminScreen() {
   const togglePaid = async (t) => { await supabase.from("tenants").update({ is_paid: !t.is_paid }).eq("id", t.id); load(); };
   const setValidUntil = async (t, date) => { await supabase.from("tenants").update({ valid_until: date || null }).eq("id", t.id); load(); };
 
+  const downloadBackup = async (t) => {
+    setDownloadingId(t.id);
+    try {
+      const scoped = await fetchTenantScoped(t.id);
+      const { data: banks } = await supabase.from("bank_accounts").select("*").eq("tenant_id", t.id);
+      exportExcelBackup({ businessName: t.business_name }, scoped.customers, scoped.items, scoped.receipts, (banks || []).map(mapBank));
+    } finally { setDownloadingId(null); }
+  };
+
   if (openTenantId) return <AdminTenantView tenantId={openTenantId} onBack={() => setOpenTenantId(null)} />;
   if (tenants === null) return <p className="text-sm text-[var(--ink-soft)] font-body">Loading sign-ups…</p>;
+
+  const in30Days = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+  const renewals = tenants.filter((t) => t.valid_until && t.valid_until <= in30Days).sort((a, b) => a.valid_until < b.valid_until ? -1 : 1);
+  const topActive = [...tenants].sort((a, b) => (txnCounts[b.id] || 0) - (txnCounts[a.id] || 0)).slice(0, 5).filter((t) => txnCounts[t.id]);
+
+  const renewalWaLink = (t) => waLink(t.contact_no, `Hi, this is a reminder from OONE that your subscription ${t.valid_until && t.valid_until < todayISO() ? "expired on" : "is due to expire on"} ${t.valid_until}. Please renew to continue using your account without interruption.`);
 
   return (
     <div>
       <h2 className="font-display text-xl mb-1 flex items-center gap-2"><ShieldAlert size={18} className="text-[var(--brass-dark)]" /> Platform Admin</h2>
-      <p className="text-xs text-[var(--ink-soft)] font-body mb-6">Every business that has signed up for OONE. Click a company to open it.</p>
+      <p className="text-xs text-[var(--ink-soft)] font-body mb-6">Click a company to open a read-only view of their account.</p>
+
+      <h3 className="font-display text-base mb-2">Upcoming / overdue renewals</h3>
+      {renewals.length === 0 ? <p className="text-sm text-[var(--ink-soft)] font-body mb-6">Nothing due in the next 30 days.</p> : (
+        <div className="space-y-2 mb-8">
+          {renewals.map((t) => {
+            const expired = t.valid_until < todayISO();
+            return (
+              <div key={t.id} className={`flex items-center justify-between bg-white border-l-4 rounded-lg px-4 py-2.5 ${expired ? "border-[var(--red)]" : "border-[var(--amber)]"}`}>
+                <div>
+                  <div className="text-sm font-body font-medium">{t.business_name}</div>
+                  <div className="text-xs text-[var(--ink-soft)] font-body">{expired ? "Expired" : "Due"} {t.valid_until} · {t.contact_no || "no contact number"}</div>
+                </div>
+                {t.contact_no && <a href={renewalWaLink(t)} target="_blank" rel="noreferrer" className="text-[var(--green-dark)] hover:opacity-70"><MessageCircle size={17} /></a>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <h3 className="font-display text-base mb-2">Most active companies</h3>
+      {topActive.length === 0 ? <p className="text-sm text-[var(--ink-soft)] font-body mb-6">No activity recorded yet.</p> : (
+        <div className="space-y-2 mb-8">
+          {topActive.map((t) => (
+            <div key={t.id} className="flex items-center justify-between bg-white border border-[var(--line)] rounded-lg px-4 py-2.5">
+              <span className="text-sm font-body font-medium">{t.business_name}</span>
+              <span className="text-xs font-body text-[var(--ink-soft)]">{txnCounts[t.id]} entries</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <h3 className="font-display text-base mb-2">All companies</h3>
       <div className="space-y-2">
         {tenants.map((t) => {
           const expired = t.valid_until && t.valid_until < todayISO();
@@ -1411,6 +1655,10 @@ function AdminScreen() {
                   <button onClick={() => togglePaid(t)} className={`text-[10px] font-body font-medium px-2 py-0.5 rounded-full border ${t.is_paid ? "bg-[var(--green)]/10 text-[var(--green-dark)] border-[var(--green)]/30" : "text-[var(--ink-soft)] border-[var(--line)]"}`}>{t.is_paid ? "Paid" : "Free"}</button>
                   <span className={`text-[10px] font-body font-medium px-2 py-0.5 rounded-full ${t.status === "active" ? "bg-[var(--green)]/10 text-[var(--green-dark)]" : "bg-[var(--red)]/10 text-[var(--red)]"}`}>{t.status}</span>
                   {expired && <span className="text-[10px] font-body font-medium px-2 py-0.5 rounded-full bg-[var(--red)]/10 text-[var(--red)]">Expired</span>}
+                  {t.contact_no && <a href={renewalWaLink(t)} target="_blank" rel="noreferrer" className="text-[var(--green-dark)] hover:opacity-70" title="Send WhatsApp"><MessageCircle size={15} /></a>}
+                  <button disabled={downloadingId === t.id} onClick={() => downloadBackup(t)} className="text-xs font-body font-medium flex items-center gap-1 border border-[var(--line)] rounded px-2 py-1 hover:border-[var(--ink)]">
+                    <Download size={12} /> {downloadingId === t.id ? "…" : "Backup"}
+                  </button>
                   <button onClick={() => toggleStatus(t)} className="text-xs font-body font-medium flex items-center gap-1 border border-[var(--line)] rounded px-2 py-1 hover:border-[var(--ink)]">
                     {t.status === "active" ? <><Ban size={12} /> Suspend</> : <><CheckCircle2 size={12} /> Activate</>}
                   </button>
@@ -1435,6 +1683,7 @@ function AdminTenantView({ tenantId, onBack }) {
   const [customers, setCustomers] = useState([]);
   const [items, setItems] = useState([]);
   const [receipts, setReceipts] = useState([]);
+  const [topups, setTopups] = useState([]);
   const [selectedCustomerId, setSelectedCustomerId] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -1443,7 +1692,7 @@ function AdminTenantView({ tenantId, onBack }) {
       const { data: t } = await supabase.from("tenants").select("*").eq("id", tenantId).single();
       setTenant(t);
       const scoped = await fetchTenantScoped(tenantId);
-      setCustomers(scoped.customers); setItems(scoped.items); setReceipts(scoped.receipts);
+      setCustomers(scoped.customers); setItems(scoped.items); setReceipts(scoped.receipts); setTopups(scoped.topups);
       setLoading(false);
     })();
   }, [tenantId]);
@@ -1454,7 +1703,7 @@ function AdminTenantView({ tenantId, onBack }) {
     return (
       <div>
         <p className="text-xs font-body text-[var(--ink-soft)] mb-2 bg-[var(--paper-dim)] inline-block px-2 py-1 rounded">Viewing {tenant.business_name} — read only</p>
-        <LedgerScreen customers={customers} items={items} receipts={receipts} selectedCustomerId={selectedCustomerId} setSelectedCustomerId={setSelectedCustomerId} onOpenLightbox={() => {}} readOnly />
+        <LedgerScreen customers={customers} items={items} receipts={receipts} topups={topups} selectedCustomerId={selectedCustomerId} setSelectedCustomerId={setSelectedCustomerId} onOpenLightbox={() => {}} readOnly />
       </div>
     );
   }
@@ -1462,7 +1711,7 @@ function AdminTenantView({ tenantId, onBack }) {
   const asOf = todayISO();
   let interestDue = 0, outstanding = 0;
   items.forEach((item) => {
-    const state = computeItemState(item, receipts.filter((r) => r.itemId === item.id), asOf);
+    const state = computeItemState(item, receipts.filter((r) => r.itemId === item.id), asOf, topups.filter((t) => t.itemId === item.id));
     outstanding += state.balance;
     if (!state.isClosed) interestDue += state.unpaidInterest;
   });
