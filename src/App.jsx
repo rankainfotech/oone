@@ -338,11 +338,14 @@ export default function App() {
   const [topups, setTopups] = useState([]);
   const [selectedCustomerId, setSelectedCustomerId] = useState(null);
   const [selectedBankId, setSelectedBankId] = useState(null);
+  const [detailKind, setDetailKind] = useState(null);
+  const [detailRange, setDetailRange] = useState({ start: null, end: null });
   const [editCustomer, setEditCustomer] = useState(null);
   const [editItem, setEditItem] = useState(null);
   const [editReceipt, setEditReceipt] = useState(null);
   const [toast, setToast] = useState(null);
   const [lightboxUrl, setLightboxUrl] = useState(null);
+  const [pendingWhatsApp, setPendingWhatsApp] = useState(null);
   const [recoveryMode, setRecoveryMode] = useState(false);
 
   useEffect(() => {
@@ -362,6 +365,12 @@ export default function App() {
       await loadAll();
     })();
   }, [session]);
+
+  useEffect(() => {
+    if (profile?.is_super_admin && ["dashboard", "customers", "payment", "receipt", "reports", "ledger", "bankLedger"].includes(screen)) {
+      setScreen("admin");
+    }
+  }, [profile]);
 
   const loadAll = async () => {
     const [c, i, r, b, tu] = await Promise.all([fetchCustomers(), fetchItems(), fetchReceipts(), fetchBankAccounts(), fetchTopups()]);
@@ -397,20 +406,36 @@ export default function App() {
   const isExpired = tenant?.validUntil && !profile.is_super_admin && todayISO() > tenant.validUntil;
   const blockIfExpired = () => { if (isExpired) { showToast(`Your account validity ended on ${tenant.validUntil}. Contact support to renew.`); return true; } return false; };
 
-  const navItems = [
-    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-    { id: "customers", label: "Customers", icon: Users },
-    { id: "payment", label: "Payment", icon: HandCoins },
-    { id: "receipt", label: "Receipt", icon: Wallet },
-    { id: "reports", label: "Reports", icon: FileBarChart2 },
-    { id: "profile", label: "My Profile", icon: UserCog },
-  ];
-  if (profile.is_super_admin) navItems.push({ id: "admin", label: "Admin", icon: ShieldAlert });
+  const navItems = profile.is_super_admin
+    ? [
+        { id: "profile", label: "My Profile", icon: UserCog },
+        { id: "admin", label: "Admin Dashboard", icon: ShieldAlert },
+      ]
+    : [
+        { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+        { id: "customers", label: "Customers", icon: Users },
+        { id: "payment", label: "Payment", icon: HandCoins },
+        { id: "receipt", label: "Receipt", icon: Wallet },
+        { id: "reports", label: "Reports", icon: FileBarChart2 },
+        { id: "profile", label: "My Profile", icon: UserCog },
+      ];
 
   return (
     <div className="min-h-screen font-body bg-white text-[var(--ink)]">
       <style>{FONT_STYLE}</style>
       {lightboxUrl && <Lightbox url={lightboxUrl} onClose={() => setLightboxUrl(null)} />}
+      {pendingWhatsApp && (
+        <div className="fixed inset-0 z-[90] bg-black/40 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl p-5 max-w-xs w-full shadow-2xl">
+            <p className="font-display text-lg mb-1">Send WhatsApp alert?</p>
+            <p className="text-sm text-[var(--ink-soft)] font-body mb-4">Let the customer know about this transaction over WhatsApp.</p>
+            <div className="flex gap-2">
+              <button onClick={() => setPendingWhatsApp(null)} className="flex-1 border border-[var(--line)] rounded py-2 text-sm font-body font-medium">No</button>
+              <button onClick={() => { window.open(waLink(pendingWhatsApp.mobile, pendingWhatsApp.message), "_blank"); setPendingWhatsApp(null); }} className="flex-1 bg-[var(--ink)] text-white rounded py-2 text-sm font-body font-medium">Yes, send</button>
+            </div>
+          </div>
+        </div>
+      )}
       {toast && <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-[var(--ink)] text-white text-sm px-4 py-2 rounded-full shadow-lg font-body">{toast}</div>}
 
       <Sidebar navItems={navItems} screen={screen} setScreen={setScreen} onLogout={() => supabase.auth.signOut()} tenantLogo={tenant?.logo} />
@@ -425,7 +450,8 @@ export default function App() {
             </div>
           )}
           {screen === "dashboard" && (
-            <Dashboard customers={customers} items={items} receipts={receipts} topups={topups} bankAccounts={bankAccounts} openLedger={openLedger} onOpenLightbox={setLightboxUrl} onOpenBankLedger={(id) => { setSelectedBankId(id); setScreen("bankLedger"); }} />
+            <Dashboard customers={customers} items={items} receipts={receipts} topups={topups} bankAccounts={bankAccounts} openLedger={openLedger} onOpenLightbox={setLightboxUrl} onOpenBankLedger={(id) => { setSelectedBankId(id); setScreen("bankLedger"); }}
+              onOpenDetail={(kind, start, end) => { setDetailKind(kind); setDetailRange({ start, end }); setScreen("dashboardDetail"); }} />
           )}
           {screen === "customers" && (
             <CustomersScreen customers={customers} items={items}
@@ -453,12 +479,22 @@ export default function App() {
                 if (!editItem && blockIfExpired()) return;
                 if (editItem) await updateItemRow(editItem.id, item); else await insertItem(item);
                 await loadAll(); showToast(editItem ? "Loan updated" : "Payment (loan) recorded");
-                setEditItem(null); setScreen(editItem ? "ledger" : "dashboard");
+                const editing = !!editItem;
+                setEditItem(null);
+                setSelectedCustomerId(item.customerId);
+                setScreen("ledger");
+                if (!editing) {
+                  const cust = customers.find((c) => c.id === item.customerId);
+                  if (cust?.mobile) setPendingWhatsApp({ mobile: cust.mobile, message: `Hi ${cust.name}, this confirms we have paid you ${inr(item.principal)} today against "${item.description || "your mortgaged item"}". Thank you — ${tenant.businessName}.` });
+                }
               }}
               onSaveTopup={async (t) => {
                 if (blockIfExpired()) return;
                 await insertTopup(t); await loadAll(); showToast("Additional amount recorded against the item");
-                setScreen("dashboard");
+                setSelectedCustomerId(t.customerId);
+                setScreen("ledger");
+                const cust = customers.find((c) => c.id === t.customerId);
+                if (cust?.mobile) setPendingWhatsApp({ mobile: cust.mobile, message: `Hi ${cust.name}, this confirms we have paid you an additional ${inr(t.amount)} today against your existing mortgaged item. Thank you — ${tenant.businessName}.` });
               }}
               businessName={tenant.businessName} />
           )}
@@ -468,7 +504,15 @@ export default function App() {
                 if (!editReceipt && blockIfExpired()) return;
                 if (editReceipt) await updateReceiptRow(editReceipt.id, r); else await insertReceipt(r);
                 await loadAll(); showToast(editReceipt ? "Receipt updated" : "Receipt recorded");
-                setEditReceipt(null); setScreen(editReceipt ? "ledger" : "dashboard");
+                const editing = !!editReceipt;
+                setEditReceipt(null);
+                setSelectedCustomerId(r.customerId);
+                setScreen("ledger");
+                if (!editing) {
+                  const cust = customers.find((c) => c.id === r.customerId);
+                  const total = (r.principalPaid || 0) + (r.interestPaid || 0);
+                  if (cust?.mobile) setPendingWhatsApp({ mobile: cust.mobile, message: `Hi ${cust.name}, this confirms we have received ${inr(total)} from you today (Principal: ${inr(r.principalPaid || 0)}, Interest: ${inr(r.interestPaid || 0)}). Thank you — ${tenant.businessName}.` });
+                }
               }}
               businessName={tenant.businessName} />
           )}
@@ -505,6 +549,10 @@ export default function App() {
             <BankLedgerScreen bank={bankAccounts.find((b) => b.id === selectedBankId)} items={items} receipts={receipts} customers={customers}
               onBack={() => setScreen("profile")} />
           )}
+          {screen === "dashboardDetail" && detailKind && (
+            <DashboardDetailScreen kind={detailKind} start={detailRange.start} end={detailRange.end} customers={customers} items={items} receipts={receipts}
+              onBack={() => setScreen("dashboard")} openLedger={openLedger} />
+          )}
           {screen === "admin" && profile.is_super_admin && <AdminScreen />}
         </main>
       </div>
@@ -522,6 +570,7 @@ function AuthScreen() {
   const [showForgotPw, setShowForgotPw] = useState(false);
   const [showForgotId, setShowForgotId] = useState(false);
   const [forgotEmail, setForgotEmail] = useState("");
+  const [showLegal, setShowLegal] = useState(null); // 'terms' | 'privacy' | null
 
   const signup = async () => {
     setErr(""); setInfo("");
@@ -551,6 +600,17 @@ function AuthScreen() {
     if (error) setErr(error.message);
     else setInfo("If that email has an account, a password reset link has been sent.");
   };
+
+  if (showLegal) {
+    return (
+      <div className="min-h-screen bg-white px-4 py-10">
+        <div className="max-w-2xl mx-auto">
+          <button onClick={() => setShowLegal(null)} className="text-sm text-[var(--ink-soft)] flex items-center gap-1 mb-6"><ArrowLeft size={15} /> Back</button>
+          {showLegal === "terms" ? <TermsContent /> : <PrivacyContent />}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex items-center justify-center px-4 bg-white">
@@ -608,14 +668,107 @@ function AuthScreen() {
               {mode === "signup" && (
                 <p className="text-[10px] text-[var(--ink-soft)] font-body mt-3 text-center leading-relaxed">
                   By continuing, you agree to our{" "}
-                  <a href="https://rojmel.com/terms-and-condition" target="_blank" rel="noreferrer" className="underline hover:text-[var(--ink)]">Terms of Service</a> and{" "}
-                  <a href="https://rojmel.com/privacy-policy" target="_blank" rel="noreferrer" className="underline hover:text-[var(--ink)]">Privacy Policy</a>.
+                  <button type="button" onClick={() => setShowLegal("terms")} className="underline hover:text-[var(--ink)]">Terms of Service</button> and{" "}
+                  <button type="button" onClick={() => setShowLegal("privacy")} className="underline hover:text-[var(--ink)]">Privacy Policy</button>.
                 </p>
               )}
             </>
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function LegalH({ children }) { return <h2 className="font-display text-lg mt-6 mb-2">{children}</h2>; }
+function LegalP({ children }) { return <p className="text-sm text-[var(--ink-soft)] font-body leading-relaxed mb-3">{children}</p>; }
+
+function TermsContent() {
+  return (
+    <div>
+      <h1 className="font-display text-2xl mb-1">Terms of Service</h1>
+      <p className="text-xs text-[var(--ink-soft)] font-body mb-4">Last updated: September 2026</p>
+      <div className="bg-[var(--paper-dim)] border border-[var(--line)] rounded-lg p-3 mb-4">
+        <p className="text-xs font-body text-[var(--ink-soft)]">This is a general-purpose draft covering the essential points for a record-keeping SaaS tool. It has not been reviewed by a lawyer. Because OONE is used for money-lending records, please have a qualified lawyer review and adapt this before relying on it, and confirm your own use of OONE complies with applicable money-lending, licensing, and consumer-protection laws in your state and jurisdiction.</p>
+      </div>
+
+      <LegalH>1. Acceptance of these Terms</LegalH>
+      <LegalP>By creating an account or using OONE ("the Service"), you agree to be bound by these Terms of Service. If you do not agree, do not use the Service.</LegalP>
+
+      <LegalH>2. What OONE Is</LegalH>
+      <LegalP>OONE is a record-keeping and ledger-management tool that helps money-lending businesses track customers, loans, repayments, and interest. OONE is a software tool only — it does not lend money, is not a party to any loan you record, and does not provide legal, tax, accounting, or financial advice.</LegalP>
+
+      <LegalH>3. Your Responsibilities</LegalH>
+      <LegalP>You are solely responsible for: (a) obtaining any licenses or registrations required to operate a money-lending business in your jurisdiction; (b) the accuracy of the data you enter; (c) how you communicate with and treat your customers, including interest rates charged and collection practices; and (d) complying with all applicable laws, including consumer protection and data protection laws.</LegalP>
+
+      <LegalH>4. Accounts and Security</LegalH>
+      <LegalP>You are responsible for keeping your login credentials confidential and for all activity under your account. Notify us immediately if you suspect unauthorized access.</LegalP>
+
+      <LegalH>5. Your Data</LegalH>
+      <LegalP>You own the customer and transaction data you enter into OONE. We do not sell your data. See our Privacy Policy for details on what we collect and how it's used and protected.</LegalP>
+
+      <LegalH>6. Subscription, Fees, and Validity</LegalH>
+      <LegalP>Some features or continued access may be subject to a subscription term or validity period set on your account. We will make reasonable efforts to notify you before any expiry. Continuing to use the Service after a renewal is due may require payment of applicable fees.</LegalP>
+
+      <LegalH>7. Suspension and Termination</LegalH>
+      <LegalP>We may suspend or terminate accounts that violate these Terms, are used for unlawful lending practices, or where required by law. You may stop using the Service at any time; you remain responsible for any obligations to your own customers independent of OONE.</LegalP>
+
+      <LegalH>8. No Warranty; Limitation of Liability</LegalH>
+      <LegalP>The Service is provided "as is." Interest and balance calculations are provided as a convenience based on the data and settings you enter; you are responsible for verifying accuracy before relying on them for legal, tax, or collection purposes. To the maximum extent permitted by law, we are not liable for indirect, incidental, or consequential damages, or for losses arising from your money-lending business activities, disputes with your customers, or regulatory non-compliance.</LegalP>
+
+      <LegalH>9. Changes to the Service or these Terms</LegalH>
+      <LegalP>We may update these Terms or the Service from time to time. We will make reasonable efforts to notify you of material changes. Your continued use after changes take effect constitutes acceptance.</LegalP>
+
+      <LegalH>10. Data Retention on Changes</LegalH>
+      <LegalP>Software updates to OONE will not delete or overwrite your existing customer or transaction records without your explicit consent, except where you yourself request deletion, or where required by law.</LegalP>
+
+      <LegalH>11. Governing Law</LegalH>
+      <LegalP>These Terms are governed by the laws of India, without regard to conflict-of-law principles, unless otherwise required by local law applicable to you.</LegalP>
+
+      <LegalH>12. Contact</LegalH>
+      <LegalP>Questions about these Terms can be sent to the contact details published on our website, www.oone.in.</LegalP>
+    </div>
+  );
+}
+
+function PrivacyContent() {
+  return (
+    <div>
+      <h1 className="font-display text-2xl mb-1">Privacy Policy</h1>
+      <p className="text-xs text-[var(--ink-soft)] font-body mb-4">Last updated: September 2026</p>
+      <div className="bg-[var(--paper-dim)] border border-[var(--line)] rounded-lg p-3 mb-4">
+        <p className="text-xs font-body text-[var(--ink-soft)]">This is a general-purpose draft. Because OONE stores sensitive personal data (including government ID numbers and photographs of your customers), please have this reviewed by a qualified lawyer for compliance with India's Digital Personal Data Protection Act, 2023 (DPDP Act) and any other applicable data protection law before relying on it.</p>
+      </div>
+
+      <LegalH>1. What We Collect</LegalH>
+      <LegalP>Account data: your name, business name, email, phone number, and business address. Customer records you enter: names, mobile numbers, dates of birth, government ID numbers and photographs, addresses, and photographs of mortgaged items. Financial records you enter: loan amounts, interest rates, repayment history, and bank account details you add for your own bookkeeping.</LegalP>
+
+      <LegalH>2. How We Use It</LegalH>
+      <LegalP>Solely to operate the Service for you: storing and displaying your records, performing the interest and balance calculations you request, generating the Excel backups you download, and — where you use the platform administrator's tools — allowing basic account administration such as suspension or renewal reminders.</LegalP>
+
+      <LegalH>3. Who Can See Your Data</LegalH>
+      <LegalP>Your business's data is stored separately from every other business using OONE and is not merged or shared with other accounts. The platform administrator (OONE) can, for support and account-administration purposes, access account-level information (business name, contact details, sign-up date, subscription validity) but does not view your customers' individual transaction details as a routine matter.</LegalP>
+
+      <LegalH>4. Data Storage and Security</LegalH>
+      <LegalP>Data is stored using industry-standard hosted database infrastructure with encryption in transit. Access to your account is protected by a password you control. No method of electronic storage is 100% secure, and we cannot guarantee absolute security.</LegalP>
+
+      <LegalH>5. Data Retention and Deletion</LegalH>
+      <LegalP>Your records are retained for as long as your account is active. We will not delete or overwrite your existing records as part of a software update without your explicit consent. You may request deletion of your account and associated data by contacting us; some information may be retained where required by law.</LegalP>
+
+      <LegalH>6. Third-Party Sharing</LegalH>
+      <LegalP>We do not sell your data or your customers' data. When you choose to send a WhatsApp message to a customer from within OONE, that message is sent via WhatsApp's own service and is subject to WhatsApp's terms and privacy practices.</LegalP>
+
+      <LegalH>7. Your Choices</LegalH>
+      <LegalP>You control what customer data you enter. You can edit or delete customer and transaction records you no longer need, subject to the safeguards in the app that prevent accidental data loss (for example, requiring transactions to be removed before a customer record can be deleted).</LegalP>
+
+      <LegalH>8. Children's Data</LegalH>
+      <LegalP>OONE is intended for business use by adults operating a lending business and is not directed at children.</LegalP>
+
+      <LegalH>9. Changes to this Policy</LegalH>
+      <LegalP>We may update this Privacy Policy from time to time. Material changes will be reflected by updating the "Last updated" date above.</LegalP>
+
+      <LegalH>10. Contact</LegalH>
+      <LegalP>Questions about this Privacy Policy can be sent to the contact details published on our website, www.oone.in.</LegalP>
     </div>
   );
 }
@@ -758,12 +911,13 @@ function PeriodBar({ period }) {
 }
 
 /* ---------------- Dashboard ---------------- */
-function Dashboard({ customers, items, receipts, topups, bankAccounts, openLedger, onOpenLightbox, onOpenBankLedger }) {
+function Dashboard({ customers, items, receipts, topups, bankAccounts, openLedger, onOpenLightbox, onOpenBankLedger, onOpenDetail }) {
   const period = usePeriod();
   const { start, end } = period;
   const asOfClamped = end > todayISO() ? todayISO() : end;
   const custName = (id) => customers.find((c) => c.id === id)?.name || "Unknown";
   const custMobile = (id) => customers.find((c) => c.id === id)?.mobile || "";
+  const dueRef = useRef(null);
 
   const stats = useMemo(() => {
     let totalLentInPeriod = 0, outstandingPrincipal = 0, cashBalance = 0, bankBalance = 0;
@@ -803,39 +957,42 @@ function Dashboard({ customers, items, receipts, topups, bankAccounts, openLedge
     const upcomingList = Object.entries(upcomingByCustomer).map(([customerId, days]) => ({ customerId, days })).sort((a, b) => b.days - a.days);
 
     return { totalLentInPeriod, outstandingPrincipal, interestDue: dueList.reduce((s, d) => s + d.due, 0), interestReceivedInPeriod, cashBalance, bankBalance, byBankAccount, dueList: dueList.slice(0, 8), upcomingList: upcomingList.slice(0, 8) };
-  }, [items, receipts, start, end]);
+  }, [items, receipts, topups, start, end]);
 
   const cards = [
-    { label: "Lent this period", value: stats.totalLentInPeriod, color: "var(--ink)" },
-    { label: "Outstanding principal", value: stats.outstandingPrincipal, color: "var(--brass-dark)" },
-    { label: "Interest due", value: stats.interestDue, color: "var(--red)" },
-    { label: "Interest received", value: stats.interestReceivedInPeriod, color: "var(--green-dark)" },
-    { label: "Cash balance", value: stats.cashBalance, color: "var(--ink)" },
-    { label: "Bank balance", value: stats.bankBalance, color: "var(--ink)" },
+    { label: "Lent this period", value: stats.totalLentInPeriod, color: "var(--ink)", onClick: () => onOpenDetail("lent", start, end) },
+    { label: "Outstanding principal", value: stats.outstandingPrincipal, color: "var(--brass-dark)", onClick: () => onOpenDetail("outstanding", start, end) },
+    { label: "Interest due", value: stats.interestDue, color: "var(--red)", onClick: () => dueRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }) },
+    { label: "Interest received", value: stats.interestReceivedInPeriod, color: "var(--green-dark)", onClick: () => onOpenDetail("received", start, end) },
+    { label: "Cash balance", value: stats.cashBalance, color: "var(--ink)", onClick: () => onOpenDetail("cash", start, end) },
   ];
 
   return (
     <div>
       <PeriodBar period={period} />
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-3">
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-8">
         {cards.map((c) => (
-          <div key={c.label} className="bg-white rounded-lg p-4 border border-[var(--line)]">
+          <button key={c.label} onClick={c.onClick} className="text-left bg-white rounded-lg p-4 border border-[var(--line)] hover:border-[var(--ink)] transition-colors">
             <div className="text-[11px] font-body text-[var(--ink-soft)] mb-1.5">{c.label}</div>
             <div className="font-display text-2xl tabnum ledger-total pb-1.5 inline-block" style={{ color: c.color }}>{inr(c.value)}</div>
-          </div>
+          </button>
         ))}
-      </div>
-      {bankAccounts.length > 0 && (
-        <div className="flex flex-wrap gap-2 mb-8">
-          {bankAccounts.map((b) => (
-            <button key={b.id} onClick={() => onOpenBankLedger(b.id)} className="text-xs font-body bg-[var(--paper-dim)] hover:bg-[var(--line)] rounded-full px-3 py-1.5 transition-colors">
-              {b.bankName} ({b.accountNumber.slice(-4)}): <b className="tabnum">{inr(stats.byBankAccount[b.id] || 0)}</b>
-            </button>
-          ))}
+        <div className="bg-white rounded-lg p-4 border border-[var(--line)]">
+          <div className="text-[11px] font-body text-[var(--ink-soft)] mb-1.5">Bank balance</div>
+          <div className="font-display text-2xl tabnum ledger-total pb-1.5 inline-block text-[var(--ink)]">{inr(stats.bankBalance)}</div>
+          {bankAccounts.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 mt-2">
+              {bankAccounts.map((b) => (
+                <button key={b.id} onClick={() => onOpenBankLedger(b.id)} className="text-[10px] font-body bg-[var(--paper-dim)] hover:bg-[var(--line)] rounded-full px-2 py-1 transition-colors">
+                  {b.bankName} ({b.accountNumber.slice(-4)}): <b className="tabnum">{inr(stats.byBankAccount[b.id] || 0)}</b>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
-      )}
+      </div>
 
-      <h3 className="font-display text-lg mb-3">Interest due, highest first</h3>
+      <h3 ref={dueRef} className="font-display text-lg mb-3">Interest due, highest first</h3>
       {stats.dueList.length === 0 ? (
         <p className="text-sm text-[var(--ink-soft)] font-body py-6 text-center border border-dashed border-[var(--line)] rounded-lg mb-8">Nothing outstanding — every account is settled.</p>
       ) : (
@@ -1043,38 +1200,26 @@ function PaymentEntry({ customers, items, receipts, topups, bankAccounts, existi
   }, [topupItemId, customerActiveItems]);
 
   const submit = async () => {
-    const waWindow = isEdit ? null : window.open("", "_blank");
     setSaving(true);
     try {
       if (!isEdit && entryMode === "topup") {
-        if (!topupItemId || !amount) { waWindow?.close(); setSaving(false); return; }
-        const cust = customers.find((c) => c.id === customerId);
+        if (!topupItemId || !amount) { setSaving(false); return; }
         await onSaveTopup({ itemId: topupItemId, customerId, date, amount: parseFloat(amount), paymentMode: mode, bankAccountId: mode === "bank" ? bankAccountId || null : null });
-        if (waWindow && cust?.mobile) {
-          waWindow.location.href = waLink(cust.mobile, `Hi ${cust.name}, this confirms we have paid you an additional ${inr(parseFloat(amount))} today against your existing mortgaged item. Thank you — ${businessName || "OONE"}.`);
-        } else waWindow?.close();
         return;
       }
       let custId = customerId;
       let rate = customers.find((c) => c.id === custId)?.rate ?? 24;
       let interestType = customers.find((c) => c.id === custId)?.interestType ?? "simple";
-      let custMobile = customers.find((c) => c.id === custId)?.mobile;
-      let custName = customers.find((c) => c.id === custId)?.name;
       if (creatingNew) {
-        if (!newCust.name.trim() || !newCust.mobile.trim()) { waWindow?.close(); setSaving(false); return; }
+        if (!newCust.name.trim() || !newCust.mobile.trim()) { setSaving(false); return; }
         const dupe = await findCustomerByMobile(newCust.mobile, null);
-        if (dupe) { setMobileErr(`This number is already used by ${dupe.name}.`); waWindow?.close(); setSaving(false); return; }
+        if (dupe) { setMobileErr(`This number is already used by ${dupe.name}.`); setSaving(false); return; }
         custId = await onSaveCustomer(newCust);
         rate = newCust.rate; interestType = newCust.interestType;
-        custMobile = newCust.mobile; custName = newCust.name;
       }
-      if (!custId || !amount) { waWindow?.close(); setSaving(false); return; }
+      if (!custId || !amount) { setSaving(false); return; }
       await onSave({ customerId: custId, date, principal: parseFloat(amount), description: desc, photo, rate, interestType, paymentMode: mode, bankAccountId: mode === "bank" ? bankAccountId || null : null });
-      if (waWindow && custMobile) {
-        waWindow.location.href = waLink(custMobile, `Hi ${custName}, this confirms we have paid you ${inr(parseFloat(amount))} today against "${desc || "your mortgaged item"}". Thank you — ${businessName || "OONE"}.`);
-      } else waWindow?.close();
-    } catch (e) { waWindow?.close(); throw e; }
-    finally { setSaving(false); }
+    } finally { setSaving(false); }
   };
 
   return (
@@ -1184,17 +1329,10 @@ function ReceiptEntry({ customers, items, receipts, topups, bankAccounts, existi
 
   const submit = async () => {
     if (!itemId || (!principalPaid && !interestPaid)) return;
-    const waWindow = isEdit ? null : window.open("", "_blank");
     setSaving(true);
     try {
       await onSave({ itemId, customerId, date, principalPaid: parseFloat(principalPaid) || 0, interestPaid: parseFloat(interestPaid) || 0, paymentMode: mode, bankAccountId: mode === "bank" ? bankAccountId || null : null });
-      const cust = customers.find((c) => c.id === customerId);
-      const total = (parseFloat(principalPaid) || 0) + (parseFloat(interestPaid) || 0);
-      if (waWindow && cust?.mobile) {
-        waWindow.location.href = waLink(cust.mobile, `Hi ${cust.name}, this confirms we have received ${inr(total)} from you today (Principal: ${inr(parseFloat(principalPaid) || 0)}, Interest: ${inr(parseFloat(interestPaid) || 0)}). Thank you — ${businessName || "OONE"}.`);
-      } else waWindow?.close();
-    } catch (e) { waWindow?.close(); throw e; }
-    finally { setSaving(false); }
+    } finally { setSaving(false); }
   };
 
   return (
@@ -1419,6 +1557,56 @@ function ReportsScreen({ customers, items, receipts, topups, openLedger }) {
   );
 }
 
+/* ---------------- Dashboard drill-down lists ---------------- */
+function DashboardDetailScreen({ kind, start, end, customers, items, receipts, onBack, openLedger }) {
+  const custName = (id) => customers.find((c) => c.id === id)?.name || "Unknown";
+  const asOf = end > todayISO() ? todayISO() : end;
+
+  const titles = { lent: "Money lent this period", outstanding: "Outstanding principal, by item", received: "Interest received this period", cash: "Cash transactions this period" };
+
+  let rows = [];
+  if (kind === "lent") {
+    rows = items.filter((i) => i.date >= start && i.date <= end).sort((a, b) => (a.date < b.date ? 1 : -1))
+      .map((i) => ({ date: i.date, primary: custName(i.customerId), secondary: i.description || "Item", amount: i.principal, customerId: i.customerId }));
+  } else if (kind === "outstanding") {
+    rows = items.map((i) => ({ i, state: computeItemState(i, receipts.filter((r) => r.itemId === i.id), asOf) }))
+      .filter((x) => x.state.balance > 0.5)
+      .sort((a, b) => b.state.balance - a.state.balance)
+      .map(({ i, state }) => ({ date: i.date, primary: custName(i.customerId), secondary: i.description || "Item", amount: state.balance, customerId: i.customerId }));
+  } else if (kind === "received") {
+    rows = receipts.filter((r) => r.date >= start && r.date <= end && r.interestPaid > 0).sort((a, b) => (a.date < b.date ? 1 : -1))
+      .map((r) => ({ date: r.date, primary: custName(r.customerId), secondary: `Interest received`, amount: r.interestPaid, customerId: r.customerId }));
+  } else if (kind === "cash") {
+    const lent = items.filter((i) => i.paymentMode === "cash" && i.date >= start && i.date <= end)
+      .map((i) => ({ date: i.date, primary: custName(i.customerId), secondary: "Lent (cash)", amount: -i.principal, customerId: i.customerId }));
+    const recv = receipts.filter((r) => r.paymentMode === "cash" && r.date >= start && r.date <= end)
+      .map((r) => ({ date: r.date, primary: custName(r.customerId), secondary: "Received (cash)", amount: (r.principalPaid || 0) + (r.interestPaid || 0), customerId: r.customerId }));
+    rows = [...lent, ...recv].sort((a, b) => (a.date < b.date ? 1 : -1));
+  }
+
+  return (
+    <div>
+      <BackHeader title={titles[kind]} onBack={onBack} />
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm font-body">
+          <thead><tr className="text-left text-xs text-[var(--ink-soft)] ledger-rule"><th className="py-2 pr-2">Date</th><th className="py-2 pr-2">Customer</th><th className="py-2 pr-2">Detail</th><th className="py-2 pr-2 text-right">Amount</th></tr></thead>
+          <tbody>
+            {rows.map((r, idx) => (
+              <tr key={idx} className="ledger-rule cursor-pointer hover:bg-[var(--paper-dim)]" onClick={() => openLedger(r.customerId)}>
+                <td className="py-2 pr-2 whitespace-nowrap">{r.date}</td>
+                <td className="py-2 pr-2 underline">{r.primary}</td>
+                <td className="py-2 pr-2">{r.secondary}</td>
+                <td className={`py-2 pr-2 text-right tabnum ${r.amount < 0 ? "text-[var(--red)]" : ""}`}>{inr(r.amount)}</td>
+              </tr>
+            ))}
+            {rows.length === 0 && <tr><td colSpan={4} className="py-6 text-center text-[var(--ink-soft)]">Nothing to show for this period.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 /* ---------------- Bank Ledger ---------------- */
 function BankLedgerScreen({ bank, items, receipts, customers, onBack }) {
   const period = usePeriod();
@@ -1483,6 +1671,8 @@ function ProfileScreen({ tenant, bankAccounts, customers, items, receipts, onSav
     catch (e) { setBankErr(e.message || "Could not save this bank account."); }
     finally { setAddingBank(false); }
   };
+  const startEditBank = (b) => { setNewBank({ id: b.id, bankName: b.bankName, accountNumber: b.accountNumber, ifsc: b.ifsc || "", branch: b.branch || "" }); setBankErr(""); };
+  const cancelEditBank = () => setNewBank({ bankName: "", accountNumber: "", ifsc: "", branch: "" });
 
   return (
     <div className="max-w-2xl space-y-6">
@@ -1528,11 +1718,17 @@ function ProfileScreen({ tenant, bankAccounts, customers, items, receipts, onSav
                 <div className="text-sm font-body">{b.bankName} · {b.accountNumber} <span className="text-[var(--ink-soft)] text-xs">{b.ifsc} {b.branch}</span></div>
                 <button onClick={() => onOpenBankLedger(b.id)} className="text-xs font-body text-[var(--ink)] underline">View bank ledger</button>
               </div>
-              <button onClick={() => onDeleteBank(b.id)} className="text-[var(--ink-soft)] hover:text-[var(--red)]"><Trash2 size={14} /></button>
+              <div className="flex items-center gap-2">
+                <button onClick={() => startEditBank(b)} className="text-[var(--ink-soft)] hover:text-[var(--ink)]"><Pencil size={14} /></button>
+                <button onClick={() => onDeleteBank(b.id)} className="text-[var(--ink-soft)] hover:text-[var(--red)]"><Trash2 size={14} /></button>
+              </div>
             </div>
           ))}
           <div className="pt-2 border-t border-[var(--line)]">
-            <p className="text-xs font-medium text-[var(--ink-soft)] mb-2 font-body">Add a new bank account</p>
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-xs font-medium text-[var(--ink-soft)] font-body">{newBank.id ? "Edit bank account" : "Add a new bank account"}</p>
+              {newBank.id && <button onClick={cancelEditBank} className="text-xs text-[var(--ink-soft)]"><X size={13} /></button>}
+            </div>
             <div className="grid grid-cols-2 gap-2">
               <input placeholder="Bank name" className={inputCls} value={newBank.bankName} onChange={e => setNewBank({ ...newBank, bankName: e.target.value })} />
               <input placeholder="Account number" className={inputCls} value={newBank.accountNumber} onChange={e => setNewBank({ ...newBank, accountNumber: e.target.value })} />
@@ -1541,7 +1737,7 @@ function ProfileScreen({ tenant, bankAccounts, customers, items, receipts, onSav
             </div>
             {bankErr && <p className="text-[10px] text-[var(--red)] font-body mt-2">{bankErr}</p>}
             <button disabled={addingBank} onClick={addBank} className="mt-3 bg-[var(--ink)] disabled:opacity-50 text-white rounded px-4 py-2 text-xs font-body font-medium flex items-center gap-1.5">
-              <Plus size={13} /> {addingBank ? "Saving…" : "Save this bank account"}
+              <Plus size={13} /> {addingBank ? "Saving…" : newBank.id ? "Update bank account" : "Save this bank account"}
             </button>
           </div>
         </div>
@@ -1606,7 +1802,7 @@ function AdminScreen() {
 
   return (
     <div>
-      <h2 className="font-display text-xl mb-1 flex items-center gap-2"><ShieldAlert size={18} className="text-[var(--brass-dark)]" /> Platform Admin</h2>
+      <h2 className="font-display text-xl mb-1 flex items-center gap-2"><ShieldAlert size={18} className="text-[var(--brass-dark)]" /> Admin Dashboard</h2>
       <p className="text-xs text-[var(--ink-soft)] font-body mb-6">Click a company to open a read-only view of their account.</p>
 
       <h3 className="font-display text-base mb-2">Upcoming / overdue renewals</h3>
