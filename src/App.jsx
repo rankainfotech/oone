@@ -183,7 +183,7 @@ const mapCustomer = (r) => ({
   flatNo: r.flat_no, buildingName: r.building_name, roadName: r.road_name, area: r.area,
   city: r.city, state: r.state, country: r.country, pinCode: r.pin_code, addressLegacy: r.address,
 });
-const mapItem = (r) => ({ id: r.id, customerId: r.customer_id, date: r.date, principal: Number(r.principal), description: r.description, photo: r.photo, rate: Number(r.rate), interestType: r.interest_type, paymentMode: r.payment_mode, bankAccountId: r.bank_account_id });
+const mapItem = (r) => ({ id: r.id, customerId: r.customer_id, date: r.date, principal: Number(r.principal), description: r.description, photo: r.photo, rate: Number(r.rate), interestType: r.interest_type, paymentMode: r.payment_mode, bankAccountId: r.bank_account_id, quantity: r.quantity != null ? Number(r.quantity) : null, ratePerUnit: r.rate_per_unit != null ? Number(r.rate_per_unit) : null });
 const mapReceipt = (r) => ({ id: r.id, itemId: r.item_id, customerId: r.customer_id, date: r.date, principalPaid: Number(r.principal_paid), interestPaid: Number(r.interest_paid), paymentMode: r.payment_mode, bankAccountId: r.bank_account_id });
 const mapTopup = (r) => ({ id: r.id, itemId: r.item_id, customerId: r.customer_id, date: r.date, amount: Number(r.amount), paymentMode: r.payment_mode, bankAccountId: r.bank_account_id });
 const mapBank = (r) => ({ id: r.id, bankName: r.bank_name, accountNumber: r.account_number, ifsc: r.ifsc, branch: r.branch });
@@ -250,12 +250,12 @@ async function deleteCustomerSafely(id) {
 }
 
 async function insertItem(item) {
-  const row = { customer_id: item.customerId, date: item.date, principal: item.principal, description: item.description, photo: item.photo, rate: item.rate, interest_type: item.interestType, payment_mode: item.paymentMode || "cash", bank_account_id: item.bankAccountId || null };
+  const row = { customer_id: item.customerId, date: item.date, principal: item.principal, description: item.description, photo: item.photo, rate: item.rate, interest_type: item.interestType, payment_mode: item.paymentMode || "cash", bank_account_id: item.bankAccountId || null, quantity: item.quantity || null, rate_per_unit: item.ratePerUnit || null };
   const { error } = await supabase.from("items").insert(row);
   if (error) throw error;
 }
 async function updateItemRow(id, item) {
-  const row = { date: item.date, principal: item.principal, description: item.description, photo: item.photo, rate: item.rate, interest_type: item.interestType, payment_mode: item.paymentMode || "cash", bank_account_id: item.bankAccountId || null };
+  const row = { date: item.date, principal: item.principal, description: item.description, photo: item.photo, rate: item.rate, interest_type: item.interestType, payment_mode: item.paymentMode || "cash", bank_account_id: item.bankAccountId || null, quantity: item.quantity || null, rate_per_unit: item.ratePerUnit || null };
   const { error } = await supabase.from("items").update(row).eq("id", id);
   if (error) throw error;
 }
@@ -1182,11 +1182,20 @@ function PaymentEntry({ customers, items, receipts, topups, bankAccounts, existi
   const [mobileErr, setMobileErr] = useState("");
   const [date, setDate] = useState(existing?.date || todayISO());
   const [amount, setAmount] = useState(existing?.principal || "");
+  const [quantity, setQuantity] = useState(existing?.quantity || "");
+  const [ratePerUnit, setRatePerUnit] = useState(existing?.ratePerUnit || "");
+  const [amountTouched, setAmountTouched] = useState(!!existing);
   const [desc, setDesc] = useState(existing?.description || "");
   const [photo, setPhoto] = useState(existing?.photo || "");
   const [mode, setMode] = useState(existing?.paymentMode || "cash");
   const [bankAccountId, setBankAccountId] = useState(existing?.bankAccountId || "");
   const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (entryMode === "new" && !amountTouched && quantity && ratePerUnit) {
+      setAmount((parseFloat(quantity) * parseFloat(ratePerUnit)).toFixed(2));
+    }
+  }, [quantity, ratePerUnit, entryMode, amountTouched]);
 
   const customerActiveItems = useMemo(() => {
     return items.filter((i) => i.customerId === customerId).map((i) => ({
@@ -1218,7 +1227,7 @@ function PaymentEntry({ customers, items, receipts, topups, bankAccounts, existi
         rate = newCust.rate; interestType = newCust.interestType;
       }
       if (!custId || !amount) { setSaving(false); return; }
-      await onSave({ customerId: custId, date, principal: parseFloat(amount), description: desc, photo, rate, interestType, paymentMode: mode, bankAccountId: mode === "bank" ? bankAccountId || null : null });
+      await onSave({ customerId: custId, date, principal: parseFloat(amount), description: desc, photo, rate, interestType, paymentMode: mode, bankAccountId: mode === "bank" ? bankAccountId || null : null, quantity: quantity ? parseFloat(quantity) : null, ratePerUnit: ratePerUnit ? parseFloat(ratePerUnit) : null });
     } finally { setSaving(false); }
   };
 
@@ -1274,27 +1283,44 @@ function PaymentEntry({ customers, items, receipts, topups, bankAccounts, existi
           const daysSinceStart = Math.max(1, daysBetween(item.date, todayISO()));
           const effectiveRate = state.balance > 0 ? (state.unpaidInterest / state.balance) * (365 / daysSinceStart) * 100 : 0;
           const newAmt = parseFloat(amount) || 0;
+          const hasCollateralInfo = item.quantity && item.ratePerUnit;
+          const collateralValue = hasCollateralInfo ? item.quantity * item.ratePerUnit : null;
+          const effectiveValuePerUnit = hasCollateralInfo && item.quantity > 0 ? totalExposure / item.quantity : null;
+          const marginAvailable = hasCollateralInfo ? collateralValue - totalExposure : null;
           return (
             <div className="bg-[var(--paper-dim)] rounded-md p-3 text-xs font-body space-y-1.5">
               <p className="font-medium mb-1">Feasibility snapshot — decide if lending more makes sense</p>
               <div className="flex justify-between"><span>Outstanding principal</span><b className="tabnum">{inr(state.balance)}</b></div>
               <div className="flex justify-between"><span>Unpaid interest to date</span><b className="tabnum text-[var(--red)]">{inr(state.unpaidInterest)}</b></div>
-              <div className="flex justify-between border-t border-[var(--line)] pt-1"><span>Total current exposure</span><b className="tabnum">{inr(totalExposure)}</b></div>
+              <div className="flex justify-between border-t border-[var(--line)] pt-1"><span>Total current exposure (principal + interest)</span><b className="tabnum">{inr(totalExposure)}</b></div>
               <div className="flex justify-between"><span>Contracted rate</span><b className="tabnum">{item.rate}% p.a.</b></div>
-              <div className="flex justify-between"><span>Effective rate accrued so far</span><b className="tabnum">{effectiveRate.toFixed(1)}% p.a.</b></div>
+              <div className="flex justify-between"><span>Effective interest rate accrued so far</span><b className="tabnum">{effectiveRate.toFixed(1)}% p.a.</b></div>
+              {hasCollateralInfo ? (
+                <>
+                  <div className="flex justify-between border-t border-[var(--line)] pt-1"><span>Collateral: {item.quantity} unit(s) @ {inr(item.ratePerUnit)}/unit</span><b className="tabnum">{inr(collateralValue)}</b></div>
+                  <div className="flex justify-between"><span>Effective value per unit (exposure ÷ qty)</span><b className="tabnum">{inr(effectiveValuePerUnit)}</b></div>
+                  <div className={`flex justify-between font-medium ${marginAvailable < 0 ? "text-[var(--red)]" : "text-[var(--green-dark)]"}`}><span>Margin available against collateral value</span><b className="tabnum">{inr(marginAvailable)}</b></div>
+                </>
+              ) : (
+                <p className="text-[10px] text-[var(--ink-soft)] pt-1">This item has no quantity/rate on record, so a collateral value can't be shown — use your own judgement of what the item is worth.</p>
+              )}
               {newAmt > 0 && <div className="flex justify-between border-t border-[var(--line)] pt-1"><span>Exposure after this top-up</span><b className="tabnum">{inr(totalExposure + newAmt)}</b></div>}
-              <p className="text-[10px] text-[var(--ink-soft)] pt-1">This doesn't know the item's collateral value — use it alongside your own judgement of what the item is worth.</p>
             </div>
           );
         })()}
 
         <Field label={entryMode === "topup" ? "Additional amount paid to customer (₹)" : "Amount paid to customer (₹)"}>
-          <input type="number" className={inputCls} value={amount} onChange={e => setAmount(e.target.value)} />
+          <input type="number" className={inputCls} value={amount} onChange={e => { setAmount(e.target.value); setAmountTouched(true); }} />
         </Field>
         <ModeSelect mode={mode} setMode={setMode} bankAccountId={bankAccountId} setBankAccountId={setBankAccountId} bankAccounts={bankAccounts} />
         {entryMode === "new" && (
           <>
             <Field label="Description of mortgaged item"><textarea rows={2} className={inputCls} value={desc} onChange={e => setDesc(e.target.value)} placeholder="e.g. Gold chain, 22K, ~18g" /></Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Quantity (optional, e.g. grams)"><input type="number" className={inputCls} value={quantity} onChange={e => setQuantity(e.target.value)} /></Field>
+              <Field label="Rate per unit (optional, ₹)"><input type="number" className={inputCls} value={ratePerUnit} onChange={e => setRatePerUnit(e.target.value)} /></Field>
+            </div>
+            {quantity && ratePerUnit && <p className="text-[10px] text-[var(--ink-soft)]">Collateral value: {inr(parseFloat(quantity) * parseFloat(ratePerUnit))} — amount above was auto-filled from this; edit it if the actual loan differs.</p>}
             <PhotoPicker label="Photo of mortgaged item" value={photo} onChange={setPhoto} />
           </>
         )}
@@ -1435,8 +1461,24 @@ function LedgerScreen({ customers, items, receipts, topups = [], selectedCustome
         )}
       </div>
 
+      {(() => {
+        const withQtyRate = custItems.filter((i) => i.quantity && i.ratePerUnit);
+        if (withQtyRate.length === 0) return null;
+        const totalQty = withQtyRate.reduce((s, i) => s + i.quantity, 0);
+        const totalValue = withQtyRate.reduce((s, i) => s + i.quantity * i.ratePerUnit, 0);
+        const avgRate = totalQty > 0 ? totalValue / totalQty : 0;
+        return (
+          <div className="bg-[var(--paper-dim)] rounded-lg p-4 mb-5 flex gap-8 text-sm font-body">
+            <div><span className="text-[var(--ink-soft)] text-xs block">Total quantity mortgaged</span><b className="tabnum">{totalQty}</b></div>
+            <div><span className="text-[var(--ink-soft)] text-xs block">Average rate per unit</span><b className="tabnum">{inr(avgRate)}</b></div>
+            <div><span className="text-[var(--ink-soft)] text-xs block">Total collateral value</span><b className="tabnum">{inr(totalValue)}</b></div>
+          </div>
+        );
+      })()}
+
       {custItems.map((item) => {
         const state = computeItemState(item, receipts.filter((r) => r.itemId === item.id), asOf, itemTopups(item.id));
+        const totalLent = item.principal + itemTopups(item.id).reduce((s, t) => s + t.amount, 0);
         return (
           <div key={item.id} className="mb-4 bg-white border border-[var(--line)] rounded-lg overflow-hidden">
             <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--line)]">
@@ -1445,6 +1487,7 @@ function LedgerScreen({ customers, items, receipts, topups = [], selectedCustome
                 <div className="min-w-0">
                   <div className="text-sm font-body font-medium truncate">{item.description || "Mortgaged item"}</div>
                   <div className="text-xs text-[var(--ink-soft)] font-body">Lent {inr(item.principal)} on {item.date} · {item.paymentMode === "bank" ? "Bank" : "Cash"}</div>
+                  {item.quantity && item.ratePerUnit && <div className="text-xs text-[var(--ink-soft)] font-body">Qty {item.quantity} @ {inr(item.ratePerUnit)}/unit = {inr(item.quantity * item.ratePerUnit)}</div>}
                 </div>
               </div>
               <div className="flex items-center gap-2 shrink-0">
@@ -1453,7 +1496,8 @@ function LedgerScreen({ customers, items, receipts, topups = [], selectedCustome
                 {!readOnly && <button onClick={() => onDeleteItem(item)} className="text-[var(--ink-soft)] hover:text-[var(--red)]"><Trash2 size={14} /></button>}
               </div>
             </div>
-            <div className="px-4 py-2 flex justify-between text-xs font-body">
+            <div className="px-4 py-2 flex flex-wrap justify-between gap-x-4 text-xs font-body">
+              {totalLent > item.principal && <span>Total lent to date (incl. top-ups): <b className="tabnum">{inr(totalLent)}</b></span>}
               <span>Outstanding: <b className="tabnum">{inr(state.balance)}</b></span>
               <span>Interest due as of {asOf}: <b className="tabnum text-[var(--red)]">{inr(state.unpaidInterest)}</b></span>
             </div>
