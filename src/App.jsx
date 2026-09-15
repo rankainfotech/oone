@@ -1424,22 +1424,6 @@ function LedgerScreen({ customers, items, receipts, topups = [], selectedCustome
   const itemTopups = (itemId) => topups.filter((t) => t.itemId === itemId);
   const dueTotal = custItems.reduce((s, it) => s + computeItemState(it, receipts.filter((r) => r.itemId === it.id), asOf, itemTopups(it.id)).unpaidInterest, 0);
 
-  const rows = [];
-  for (const item of custItems) {
-    const itemReceipts = receipts.filter((r) => r.itemId === item.id);
-    const tItemTopups = itemTopups(item.id);
-    const state = computeItemState(item, itemReceipts, asOf, tItemTopups);
-    if (item.date >= start && item.date <= end) rows.push({ type: "loan", date: item.date, desc: item.description || "Mortgaged item", amount: item.principal, item });
-    tItemTopups.filter((t) => t.date >= start && t.date <= end).forEach((t) => {
-      rows.push({ type: "topup", date: t.date, desc: `Additional amount — ${item.description || "item"}`, amount: t.amount, topup: t, item });
-    });
-    itemReceipts.filter((r) => r.date >= start && r.date <= end).forEach((r) => {
-      const tag = state.receiptTags.find((t) => t.receiptId === r.id);
-      rows.push({ type: "receipt", date: r.date, desc: `Receipt — ${item.description || "item"}`, principalPaid: r.principalPaid, interestPaid: r.interestPaid, receipt: r, item, shortfall: tag?.shortfall || 0, excess: tag?.excess || 0 });
-    });
-  }
-  rows.sort((a, b) => (a.date < b.date ? -1 : 1));
-
   return (
     <div>
       <BackHeader title="Customer ledger" onBack={() => setSelectedCustomerId(null)} />
@@ -1476,9 +1460,26 @@ function LedgerScreen({ customers, items, receipts, topups = [], selectedCustome
         );
       })()}
 
+      {custItems.length === 0 && <p className="text-sm text-[var(--ink-soft)] font-body text-center py-10">No mortgaged items on record for this customer yet.</p>}
+
       {custItems.map((item) => {
-        const state = computeItemState(item, receipts.filter((r) => r.itemId === item.id), asOf, itemTopups(item.id));
-        const totalLent = item.principal + itemTopups(item.id).reduce((s, t) => s + t.amount, 0);
+        const itemReceipts = receipts.filter((r) => r.itemId === item.id);
+        const tItemTopups = itemTopups(item.id);
+        const state = computeItemState(item, itemReceipts, asOf, tItemTopups);
+        const totalLent = item.principal + tItemTopups.reduce((s, t) => s + t.amount, 0);
+
+        // Every event that ever happened on THIS item, and only this item — shown once, here.
+        const itemRows = [];
+        if (item.date >= start && item.date <= end) itemRows.push({ type: "loan", date: item.date, desc: "Original mortgage", amount: item.principal });
+        tItemTopups.filter((t) => t.date >= start && t.date <= end).forEach((t) => {
+          itemRows.push({ type: "topup", date: t.date, desc: "Additional amount", amount: t.amount, topup: t });
+        });
+        itemReceipts.filter((r) => r.date >= start && r.date <= end).forEach((r) => {
+          const tag = state.receiptTags.find((tg) => tg.receiptId === r.id);
+          itemRows.push({ type: "receipt", date: r.date, desc: "Receipt", principalPaid: r.principalPaid, interestPaid: r.interestPaid, receipt: r, shortfall: tag?.shortfall || 0, excess: tag?.excess || 0 });
+        });
+        itemRows.sort((a, b) => (a.date < b.date ? -1 : 1));
+
         return (
           <div key={item.id} className="mb-4 bg-white border border-[var(--line)] rounded-lg overflow-hidden">
             <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--line)]">
@@ -1496,46 +1497,43 @@ function LedgerScreen({ customers, items, receipts, topups = [], selectedCustome
                 {!readOnly && <button onClick={() => onDeleteItem(item)} className="text-[var(--ink-soft)] hover:text-[var(--red)]"><Trash2 size={14} /></button>}
               </div>
             </div>
-            <div className="px-4 py-2 flex flex-wrap justify-between gap-x-4 text-xs font-body">
-              {totalLent > item.principal && <span>Total lent to date (incl. top-ups): <b className="tabnum">{inr(totalLent)}</b></span>}
+            <div className="px-4 py-2 flex flex-wrap justify-between gap-x-4 text-xs font-body border-b border-[var(--line)] bg-[var(--paper-dim)]">
+              {totalLent > item.principal && <span>Total lent to date: <b className="tabnum">{inr(totalLent)}</b></span>}
               <span>Outstanding: <b className="tabnum">{inr(state.balance)}</b></span>
               <span>Interest due as of {asOf}: <b className="tabnum text-[var(--red)]">{inr(state.unpaidInterest)}</b></span>
             </div>
+            <table className="w-full text-sm font-body">
+              <thead><tr className="text-left text-[10px] text-[var(--ink-soft)] ledger-rule"><th className="py-1.5 px-4">Date</th><th className="py-1.5 px-2">Event</th><th className="py-1.5 px-2 text-right">Principal</th><th className="py-1.5 px-2 text-right">Interest</th><th className="py-1.5 px-2"></th></tr></thead>
+              <tbody>
+                {itemRows.map((r, idx) => (
+                  <tr key={idx} className={`ledger-rule border-l-4 ${r.type === "receipt" ? "border-l-[var(--green)]" : "border-l-[var(--brass)]"}`}>
+                    <td className="py-2 px-4 whitespace-nowrap">{r.date}</td>
+                    <td className="py-2 px-2">
+                      {r.desc}
+                      {r.type === "receipt" && r.shortfall > 1 && <span className="ml-2 text-[10px] font-medium text-[var(--red)] bg-[var(--red)]/10 px-1.5 py-0.5 rounded">Short {inr(r.shortfall)}</span>}
+                      {r.type === "receipt" && r.excess > 1 && <span className="ml-2 text-[10px] font-medium text-[var(--amber)] bg-yellow-50 px-1.5 py-0.5 rounded">Excess {inr(r.excess)}</span>}
+                    </td>
+                    <td className="py-2 px-2 text-right tabnum">{r.type === "receipt" ? (r.principalPaid ? "-" + inr(r.principalPaid) : "—") : inr(r.amount)}</td>
+                    <td className="py-2 px-2 text-right tabnum">{r.type === "receipt" && r.interestPaid ? "-" + inr(r.interestPaid) : "—"}</td>
+                    <td className="py-2 px-2 text-right whitespace-nowrap">
+                      {r.type === "receipt" && !readOnly && (
+                        <span className="inline-flex gap-2">
+                          <button onClick={() => onEditReceipt(r.receipt)} className="text-[var(--ink-soft)] hover:text-[var(--ink)]"><Pencil size={13} /></button>
+                          <button onClick={() => onDeleteReceipt(r.receipt)} className="text-[var(--ink-soft)] hover:text-[var(--red)]"><Trash2 size={13} /></button>
+                        </span>
+                      )}
+                      {r.type === "topup" && !readOnly && (
+                        <button onClick={() => onDeleteTopup(r.topup)} className="text-[var(--ink-soft)] hover:text-[var(--red)]"><Trash2 size={13} /></button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+                {itemRows.length === 0 && <tr><td colSpan={5} className="py-3 px-4 text-center text-[var(--ink-soft)] text-xs">No activity on this item in the selected period.</td></tr>}
+              </tbody>
+            </table>
           </div>
         );
       })}
-
-      <h3 className="font-display text-base mt-6 mb-2">Transaction history</h3>
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm font-body">
-          <thead><tr className="text-left text-xs text-[var(--ink-soft)] ledger-rule"><th className="py-2 pr-2">Date</th><th className="py-2 pr-2">Description</th><th className="py-2 pr-2 text-right">Principal</th><th className="py-2 pr-2 text-right">Interest</th><th className="py-2 pr-2"></th></tr></thead>
-          <tbody>
-            {rows.map((r, idx) => (
-              <tr key={idx} className={`ledger-rule border-l-4 ${r.type === "receipt" ? "border-l-[var(--green)]" : "border-l-[var(--brass)]"}`}>
-                <td className="py-2 pr-2 whitespace-nowrap">{r.date}</td>
-                <td className="py-2 pr-2">
-                  {r.desc}
-                  {r.type === "receipt" && r.shortfall > 1 && <span className="ml-2 text-[10px] font-medium text-[var(--red)] bg-[var(--red)]/10 px-1.5 py-0.5 rounded">Short {inr(r.shortfall)}</span>}
-                  {r.type === "receipt" && r.excess > 1 && <span className="ml-2 text-[10px] font-medium text-[var(--amber)] bg-yellow-50 px-1.5 py-0.5 rounded">Excess {inr(r.excess)}</span>}
-                </td>
-                <td className="py-2 pr-2 text-right tabnum">{r.type === "receipt" ? (r.principalPaid ? "-" + inr(r.principalPaid) : "—") : inr(r.amount)}</td>
-                <td className="py-2 pr-2 text-right tabnum">{r.type === "receipt" && r.interestPaid ? "-" + inr(r.interestPaid) : "—"}</td>
-                <td className="py-2 pr-2 text-right whitespace-nowrap">
-                  {r.type === "receipt" && !readOnly && (
-                    <span className="inline-flex gap-2">
-                      <button onClick={() => onEditReceipt(r.receipt)} className="text-[var(--ink-soft)] hover:text-[var(--ink)]"><Pencil size={13} /></button>
-                      <button onClick={() => onDeleteReceipt(r.receipt)} className="text-[var(--ink-soft)] hover:text-[var(--red)]"><Trash2 size={13} /></button>
-                    </span>
-                  )}
-                  {r.type === "topup" && !readOnly && (
-                    <button onClick={() => onDeleteTopup(r.topup)} className="text-[var(--ink-soft)] hover:text-[var(--red)]"><Trash2 size={13} /></button>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
     </div>
   );
 }
