@@ -700,9 +700,6 @@ function TermsContent() {
     <div>
       <h1 className="font-display text-2xl mb-1">Terms of Service</h1>
       <p className="text-xs text-[var(--ink-soft)] font-body mb-4">Last updated: September 2026</p>
-      <div className="bg-[var(--paper-dim)] border border-[var(--line)] rounded-lg p-3 mb-4">
-        <p className="text-xs font-body text-[var(--ink-soft)]">This is a general-purpose draft covering the essential points for a record-keeping SaaS tool. It has not been reviewed by a lawyer. Because OONE is used for money-lending records, please have a qualified lawyer review and adapt this before relying on it, and confirm your own use of OONE complies with applicable money-lending, licensing, and consumer-protection laws in your state and jurisdiction.</p>
-      </div>
 
       <LegalH>1. Acceptance of these Terms</LegalH>
       <LegalP>By creating an account or using OONE ("the Service"), you agree to be bound by these Terms of Service. If you do not agree, do not use the Service.</LegalP>
@@ -748,9 +745,6 @@ function PrivacyContent() {
     <div>
       <h1 className="font-display text-2xl mb-1">Privacy Policy</h1>
       <p className="text-xs text-[var(--ink-soft)] font-body mb-4">Last updated: September 2026</p>
-      <div className="bg-[var(--paper-dim)] border border-[var(--line)] rounded-lg p-3 mb-4">
-        <p className="text-xs font-body text-[var(--ink-soft)]">This is a general-purpose draft. Because OONE stores sensitive personal data (including government ID numbers and photographs of your customers), please have this reviewed by a qualified lawyer for compliance with India's Digital Personal Data Protection Act, 2023 (DPDP Act) and any other applicable data protection law before relying on it.</p>
-      </div>
 
       <LegalH>1. What We Collect</LegalH>
       <LegalP>Account data: your name, business name, email, phone number, and business address. Customer records you enter: names, mobile numbers, dates of birth, government ID numbers and photographs, addresses, and photographs of mortgaged items. Financial records you enter: loan amounts, interest rates, repayment history, and bank account details you add for your own bookkeeping.</LegalP>
