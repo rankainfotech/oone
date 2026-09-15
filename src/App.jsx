@@ -338,6 +338,7 @@ export default function App() {
   const [topups, setTopups] = useState([]);
   const [selectedCustomerId, setSelectedCustomerId] = useState(null);
   const [selectedBankId, setSelectedBankId] = useState(null);
+  const [bankLedgerReturnTo, setBankLedgerReturnTo] = useState("dashboard");
   const [detailKind, setDetailKind] = useState(null);
   const [detailRange, setDetailRange] = useState({ start: null, end: null });
   const [editCustomer, setEditCustomer] = useState(null);
@@ -361,13 +362,18 @@ export default function App() {
     if (!session) { setProfile(null); setTenant(null); return; }
     (async () => {
       const { data: prof } = await supabase.from("profiles").select("*, tenants(*)").eq("id", session.user.id).single();
-      if (prof) { setProfile(prof); setTenant(mapTenant(prof.tenants)); }
+      if (prof) {
+        setProfile(prof);
+        setTenant(mapTenant(prof.tenants));
+        // First-ever login (profile never filled in) lands on My Profile; every login after that goes to Dashboard.
+        if (!prof.is_super_admin && !prof.tenants?.email) setScreen("profile");
+      }
       await loadAll();
     })();
   }, [session]);
 
   useEffect(() => {
-    if (profile?.is_super_admin && ["dashboard", "customers", "payment", "receipt", "reports", "ledger", "bankLedger"].includes(screen)) {
+    if (profile?.is_super_admin && ["dashboard", "customers", "payment", "receipt", "reports", "ledger", "bankLedger", "bankAccountsList", "dashboardDetail"].includes(screen)) {
       setScreen("admin");
     }
   }, [profile]);
@@ -450,8 +456,14 @@ export default function App() {
             </div>
           )}
           {screen === "dashboard" && (
-            <Dashboard customers={customers} items={items} receipts={receipts} topups={topups} bankAccounts={bankAccounts} openLedger={openLedger} onOpenLightbox={setLightboxUrl} onOpenBankLedger={(id) => { setSelectedBankId(id); setScreen("bankLedger"); }}
+            <Dashboard customers={customers} items={items} receipts={receipts} topups={topups} bankAccounts={bankAccounts} openLedger={openLedger} onOpenLightbox={setLightboxUrl} onOpenBankLedger={(id) => { setSelectedBankId(id); setBankLedgerReturnTo("dashboard"); setScreen("bankLedger"); }}
+              onOpenBankList={() => setScreen("bankAccountsList")}
               onOpenDetail={(kind, start, end) => { setDetailKind(kind); setDetailRange({ start, end }); setScreen("dashboardDetail"); }} />
+          )}
+          {screen === "bankAccountsList" && (
+            <BankAccountsListScreen bankAccounts={bankAccounts} items={items} receipts={receipts}
+              onBack={() => setScreen("dashboard")}
+              onOpenBankLedger={(id) => { setSelectedBankId(id); setBankLedgerReturnTo("bankAccountsList"); setScreen("bankLedger"); }} />
           )}
           {screen === "customers" && (
             <CustomersScreen customers={customers} items={items}
@@ -543,11 +555,11 @@ export default function App() {
               onSaveTenant={async (t) => { try { await updateTenantRow(tenant.id, t); await reloadTenant(); showToast("Company profile saved"); } catch (e) { showToast("Could not save: " + e.message); } }}
               onAddBank={async (b) => { await upsertBankAccount({ ...b, tenantId: tenant.id }); await loadAll(); showToast("Bank account saved"); }}
               onDeleteBank={async (id) => { try { await deleteBankAccount(id); await loadAll(); showToast("Bank account removed"); } catch (e) { showToast("Could not remove: " + e.message); } }}
-              onOpenBankLedger={(id) => { setSelectedBankId(id); setScreen("bankLedger"); }} />
+              onOpenBankLedger={(id) => { setSelectedBankId(id); setBankLedgerReturnTo("profile"); setScreen("bankLedger"); }} />
           )}
           {screen === "bankLedger" && selectedBankId && (
             <BankLedgerScreen bank={bankAccounts.find((b) => b.id === selectedBankId)} items={items} receipts={receipts} customers={customers}
-              onBack={() => setScreen("profile")} />
+              onBack={() => setScreen(bankLedgerReturnTo)} />
           )}
           {screen === "dashboardDetail" && detailKind && (
             <DashboardDetailScreen kind={detailKind} start={detailRange.start} end={detailRange.end} customers={customers} items={items} receipts={receipts}
@@ -911,7 +923,7 @@ function PeriodBar({ period }) {
 }
 
 /* ---------------- Dashboard ---------------- */
-function Dashboard({ customers, items, receipts, topups, bankAccounts, openLedger, onOpenLightbox, onOpenBankLedger, onOpenDetail }) {
+function Dashboard({ customers, items, receipts, topups, bankAccounts, openLedger, onOpenLightbox, onOpenBankLedger, onOpenBankList, onOpenDetail }) {
   const period = usePeriod();
   const { start, end } = period;
   const asOfClamped = end > todayISO() ? todayISO() : end;
@@ -977,19 +989,19 @@ function Dashboard({ customers, items, receipts, topups, bankAccounts, openLedge
             <div className="font-display text-2xl tabnum ledger-total pb-1.5 inline-block" style={{ color: c.color }}>{inr(c.value)}</div>
           </button>
         ))}
-        <div className="bg-white rounded-lg p-4 border border-[var(--line)]">
+        <button onClick={onOpenBankList} className="text-left bg-white rounded-lg p-4 border border-[var(--line)] hover:border-[var(--ink)] transition-colors">
           <div className="text-[11px] font-body text-[var(--ink-soft)] mb-1.5">Bank balance</div>
           <div className="font-display text-2xl tabnum ledger-total pb-1.5 inline-block text-[var(--ink)]">{inr(stats.bankBalance)}</div>
           {bankAccounts.length > 0 && (
             <div className="flex flex-wrap gap-1.5 mt-2">
               {bankAccounts.map((b) => (
-                <button key={b.id} onClick={() => onOpenBankLedger(b.id)} className="text-[10px] font-body bg-[var(--paper-dim)] hover:bg-[var(--line)] rounded-full px-2 py-1 transition-colors">
+                <span key={b.id} onClick={(e) => { e.stopPropagation(); onOpenBankLedger(b.id); }} className="text-[10px] font-body bg-[var(--paper-dim)] hover:bg-[var(--line)] rounded-full px-2 py-1 transition-colors">
                   {b.bankName} ({b.accountNumber.slice(-4)}): <b className="tabnum">{inr(stats.byBankAccount[b.id] || 0)}</b>
-                </button>
+                </span>
               ))}
             </div>
           )}
-        </div>
+        </button>
       </div>
 
       <h3 ref={dueRef} className="font-display text-lg mb-3">Interest due, highest first</h3>
@@ -1645,6 +1657,37 @@ function DashboardDetailScreen({ kind, start, end, customers, items, receipts, o
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+/* ---------------- Bank accounts list (from Dashboard's Bank Balance box) ---------------- */
+function BankAccountsListScreen({ bankAccounts, items, receipts, onBack, onOpenBankLedger }) {
+  const asOf = todayISO();
+  const balanceFor = (bankId) => {
+    let bal = 0;
+    items.filter((i) => i.bankAccountId === bankId && i.date <= asOf).forEach((i) => { bal -= i.principal; });
+    receipts.filter((r) => r.bankAccountId === bankId && r.date <= asOf).forEach((r) => { bal += (r.principalPaid || 0) + (r.interestPaid || 0); });
+    return bal;
+  };
+  return (
+    <div>
+      <BackHeader title="Bank accounts" onBack={onBack} />
+      {bankAccounts.length === 0 ? (
+        <p className="text-sm text-[var(--ink-soft)] font-body">No bank accounts added yet — add one under My Profile.</p>
+      ) : (
+        <div className="space-y-2">
+          {bankAccounts.map((b) => (
+            <button key={b.id} onClick={() => onOpenBankLedger(b.id)} className="w-full flex items-center justify-between bg-white border border-[var(--line)] rounded-lg px-4 py-3 text-left hover:border-[var(--ink)] transition-colors">
+              <div>
+                <div className="text-sm font-body font-medium">{b.bankName}</div>
+                <div className="text-xs text-[var(--ink-soft)] font-body">{b.accountNumber} {b.ifsc ? `· ${b.ifsc}` : ""} {b.branch ? `· ${b.branch}` : ""}</div>
+              </div>
+              <div className="font-display tabnum text-lg">{inr(balanceFor(b.id))}</div>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
