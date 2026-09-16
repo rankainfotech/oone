@@ -348,11 +348,13 @@ export default function App() {
   const [lightboxUrl, setLightboxUrl] = useState(null);
   const [pendingWhatsApp, setPendingWhatsApp] = useState(null);
   const [recoveryMode, setRecoveryMode] = useState(false);
+  const justSignedInRef = useRef(false);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
     const { data: sub } = supabase.auth.onAuthStateChange((event, s) => {
       if (event === "PASSWORD_RECOVERY") setRecoveryMode(true);
+      if (event === "SIGNED_IN") justSignedInRef.current = true;
       setSession(s);
     });
     return () => sub.subscription.unsubscribe();
@@ -365,8 +367,9 @@ export default function App() {
       if (prof) {
         setProfile(prof);
         setTenant(mapTenant(prof.tenants));
-        // First-ever login (profile never filled in) lands on My Profile; every login after that goes to Dashboard.
-        if (!prof.is_super_admin && !prof.tenants?.email) setScreen("profile");
+        // First-ever LOGIN ACTION (not a page refresh) with a never-filled-in profile lands on My Profile.
+        if (justSignedInRef.current && !prof.is_super_admin && !prof.tenants?.email) setScreen("profile");
+        justSignedInRef.current = false;
       }
       await loadAll();
     })();
@@ -986,15 +989,6 @@ function Dashboard({ customers, items, receipts, topups, bankAccounts, openLedge
         <button onClick={onOpenBankList} className="text-left bg-white rounded-lg p-4 border border-[var(--line)] hover:border-[var(--ink)] transition-colors">
           <div className="text-[11px] font-body text-[var(--ink-soft)] mb-1.5">Bank balance</div>
           <div className="font-display text-2xl tabnum ledger-total pb-1.5 inline-block text-[var(--ink)]">{inr(stats.bankBalance)}</div>
-          {bankAccounts.length > 0 && (
-            <div className="flex flex-wrap gap-1.5 mt-2">
-              {bankAccounts.map((b) => (
-                <span key={b.id} onClick={(e) => { e.stopPropagation(); onOpenBankLedger(b.id); }} className="text-[10px] font-body bg-[var(--paper-dim)] hover:bg-[var(--line)] rounded-full px-2 py-1 transition-colors">
-                  {b.bankName} ({b.accountNumber.slice(-4)}): <b className="tabnum">{inr(stats.byBankAccount[b.id] || 0)}</b>
-                </span>
-              ))}
-            </div>
-          )}
         </button>
       </div>
 
@@ -1495,6 +1489,7 @@ function LedgerScreen({ customers, items, receipts, topups = [], selectedCustome
                   <div className="text-sm font-body font-medium truncate">{item.description || "Mortgaged item"}</div>
                   <div className="text-xs text-[var(--ink-soft)] font-body">Lent {inr(item.principal)} on {item.date} · {item.paymentMode === "bank" ? "Bank" : "Cash"}</div>
                   {item.quantity && item.ratePerUnit && <div className="text-xs text-[var(--ink-soft)] font-body">Qty {item.quantity} @ {inr(item.ratePerUnit)}/unit = {inr(item.quantity * item.ratePerUnit)}</div>}
+                  {item.quantity > 0 && <div className="text-xs text-[var(--ink-soft)] font-body">Average rate of item (exposure ÷ qty): <b>{inr((state.balance + state.unpaidInterest) / item.quantity)}</b>/unit</div>}
                 </div>
               </div>
               <div className="flex items-center gap-2 shrink-0">
