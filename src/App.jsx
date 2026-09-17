@@ -368,7 +368,7 @@ export default function App() {
         setProfile(prof);
         setTenant(mapTenant(prof.tenants));
         // First-ever LOGIN ACTION (not a page refresh) with a never-filled-in profile lands on My Profile.
-        if (justSignedInRef.current && !prof.is_super_admin && !prof.tenants?.email) setScreen("profile");
+        if (justSignedInRef.current && !prof.is_super_admin && !prof.tenants?.office_no) setScreen("profile");
         justSignedInRef.current = false;
       }
       await loadAll();
@@ -561,11 +561,11 @@ export default function App() {
               onOpenBankLedger={(id) => { setSelectedBankId(id); setBankLedgerReturnTo("profile"); setScreen("bankLedger"); }} />
           )}
           {screen === "bankLedger" && selectedBankId && (
-            <BankLedgerScreen bank={bankAccounts.find((b) => b.id === selectedBankId)} items={items} receipts={receipts} customers={customers}
+            <BankLedgerScreen bank={bankAccounts.find((b) => b.id === selectedBankId)} items={items} receipts={receipts} topups={topups} customers={customers}
               onBack={() => setScreen(bankLedgerReturnTo)} />
           )}
           {screen === "dashboardDetail" && detailKind && (
-            <DashboardDetailScreen kind={detailKind} start={detailRange.start} end={detailRange.end} customers={customers} items={items} receipts={receipts}
+            <DashboardDetailScreen kind={detailKind} start={detailRange.start} end={detailRange.end} customers={customers} items={items} receipts={receipts} topups={topups}
               onBack={() => setScreen("dashboard")} openLedger={openLedger} />
           )}
           {screen === "admin" && profile.is_super_admin && <AdminScreen />}
@@ -581,6 +581,7 @@ function AuthScreen() {
   const [mode, setMode] = useState("login");
   const [email, setEmail] = useState(""); const [password, setPassword] = useState("");
   const [businessName, setBusinessName] = useState(""); const [fullName, setFullName] = useState("");
+  const [mobile, setMobile] = useState("");
   const [err, setErr] = useState(""); const [info, setInfo] = useState(""); const [busy, setBusy] = useState(false);
   const [showForgotPw, setShowForgotPw] = useState(false);
   const [showForgotId, setShowForgotId] = useState(false);
@@ -589,9 +590,12 @@ function AuthScreen() {
 
   const signup = async () => {
     setErr(""); setInfo("");
-    if (!email || password.length < 6 || !businessName.trim()) { setErr("Fill in your business name, email, and a password of 6+ characters."); return; }
+    if (!email || password.length < 6 || !businessName.trim() || !mobile.trim()) { setErr("Fill in your business name, email, mobile number, and a password of 6+ characters."); return; }
     setBusy(true);
-    const { data, error } = await supabase.auth.signUp({ email, password, options: { data: { business_name: businessName.trim(), full_name: fullName.trim() } } });
+    const { data: mobileTaken, error: checkErr } = await supabase.rpc("is_mobile_taken", { check_mobile: mobile.trim() });
+    if (checkErr) { setErr(checkErr.message); setBusy(false); return; }
+    if (mobileTaken) { setErr("This mobile number is already registered to another account."); setBusy(false); return; }
+    const { data, error } = await supabase.auth.signUp({ email, password, options: { data: { business_name: businessName.trim(), full_name: fullName.trim(), mobile: mobile.trim() } } });
     setBusy(false);
     if (error) {
       if (/already registered|already exists/i.test(error.message)) setErr("An account with this email already exists. Please log in instead.");
@@ -662,6 +666,7 @@ function AuthScreen() {
                   <>
                     <Field label="Your business name"><input className={inputCls} value={businessName} onChange={e => setBusinessName(e.target.value)} placeholder="e.g. Sharma Finance" /></Field>
                     <Field label="Your name"><input className={inputCls} value={fullName} onChange={e => setFullName(e.target.value)} /></Field>
+                    <Field label="Mobile number"><input type="tel" className={inputCls} value={mobile} onChange={e => setMobile(e.target.value)} placeholder="10-digit mobile number" /></Field>
                   </>
                 )}
                 <Field label="Email"><input type="email" className={inputCls} value={email} onChange={e => setEmail(e.target.value)} /></Field>
@@ -929,7 +934,7 @@ function Dashboard({ customers, items, receipts, topups, bankAccounts, openLedge
   const dueRef = useRef(null);
 
   const stats = useMemo(() => {
-    let totalLentInPeriod = 0, outstandingPrincipal = 0, cashBalance = 0, bankBalance = 0;
+    let totalLentInPeriod = 0, totalPrincipalGiven = 0, totalPrincipalReceived = 0, cashBalance = 0, bankBalance = 0;
     const byBankAccount = {};
     const dueByCustomer = {};
     let interestReceivedInPeriod = 0;
@@ -937,9 +942,11 @@ function Dashboard({ customers, items, receipts, topups, bankAccounts, openLedge
 
     for (const item of items) {
       const itemReceipts = receipts.filter((r) => r.itemId === item.id);
+      const itemTopups = topups.filter((t) => t.itemId === item.id);
       if (item.date >= start && item.date <= end) totalLentInPeriod += item.principal;
-      const state = computeItemState(item, itemReceipts, asOfClamped, topups.filter((t) => t.itemId === item.id));
-      outstandingPrincipal += state.balance;
+      itemTopups.filter((t) => t.date >= start && t.date <= end).forEach((t) => { totalLentInPeriod += t.amount; });
+
+      const state = computeItemState(item, itemReceipts, asOfClamped, itemTopups);
       if (!state.isClosed && state.unpaidInterest > 1) {
         dueByCustomer[item.customerId] = (dueByCustomer[item.customerId] || 0) + state.unpaidInterest;
       }
@@ -952,16 +959,24 @@ function Dashboard({ customers, items, receipts, topups, bankAccounts, openLedge
       interestReceivedInPeriod += itemReceipts.filter((r) => r.date >= start && r.date <= end).reduce((s, r) => s + (r.interestPaid || 0), 0);
 
       if (item.date <= end) {
+        totalPrincipalGiven += item.principal;
         if (item.paymentMode === "bank") { bankBalance -= item.principal; if (item.bankAccountId) byBankAccount[item.bankAccountId] = (byBankAccount[item.bankAccountId] || 0) - item.principal; }
         else cashBalance -= item.principal;
       }
+      itemTopups.filter((t) => t.date <= end).forEach((t) => {
+        totalPrincipalGiven += t.amount;
+        if (t.paymentMode === "bank") { bankBalance -= t.amount; if (t.bankAccountId) byBankAccount[t.bankAccountId] = (byBankAccount[t.bankAccountId] || 0) - t.amount; }
+        else cashBalance -= t.amount;
+      });
       itemReceipts.filter((r) => r.date <= end).forEach((r) => {
+        totalPrincipalReceived += r.principalPaid || 0;
         const amt = (r.principalPaid || 0) + (r.interestPaid || 0);
         if (r.paymentMode === "bank") { bankBalance += amt; if (r.bankAccountId) byBankAccount[r.bankAccountId] = (byBankAccount[r.bankAccountId] || 0) + amt; }
         else cashBalance += amt;
       });
     }
 
+    const outstandingPrincipal = totalPrincipalGiven - totalPrincipalReceived;
     const dueList = Object.entries(dueByCustomer).map(([customerId, due]) => ({ customerId, due })).sort((a, b) => b.due - a.due);
     const upcomingList = Object.entries(upcomingByCustomer).map(([customerId, days]) => ({ customerId, days })).sort((a, b) => b.days - a.days);
 
@@ -1149,6 +1164,56 @@ function BackHeader({ title, onBack }) {
   return <div className="flex items-center gap-2 mb-4"><button onClick={onBack} className="text-[var(--ink-soft)] hover:text-[var(--ink)]"><ArrowLeft size={18} /></button><h2 className="font-display text-xl">{title}</h2></div>;
 }
 
+function CustomerPicker({ customers, value, onChange, placeholder = "Type name or mobile number…" }) {
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef(null);
+  const selected = customers.find((c) => c.id === value);
+
+  useEffect(() => {
+    function onClickOutside(e) { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false); }
+    document.addEventListener("mousedown", onClickOutside);
+    return () => document.removeEventListener("mousedown", onClickOutside);
+  }, []);
+
+  const q = query.trim().toLowerCase();
+  const matches = q.length === 0 ? customers.slice(0, 30) : customers.filter((c) => c.name.toLowerCase().includes(q) || (c.mobile || "").includes(q)).slice(0, 30);
+
+  const pick = (c) => { onChange(c.id); setQuery(""); setOpen(false); };
+  const clear = () => { onChange(""); setQuery(""); setOpen(false); };
+
+  return (
+    <div ref={wrapRef} className="relative">
+      {selected ? (
+        <div className={inputCls + " flex items-center justify-between"}>
+          <span>{selected.name} · {selected.mobile}</span>
+          <button type="button" onClick={clear} className="text-[var(--ink-soft)] hover:text-[var(--ink)] ml-2 shrink-0"><X size={15} /></button>
+        </div>
+      ) : (
+        <input
+          className={inputCls}
+          placeholder={placeholder}
+          value={query}
+          onFocus={() => setOpen(true)}
+          onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
+        />
+      )}
+      {open && !selected && (
+        <div className="absolute z-20 left-0 right-0 mt-1 bg-white border border-[var(--line)] rounded-lg shadow-lg max-h-64 overflow-y-auto">
+          {matches.length === 0 ? (
+            <p className="text-xs text-[var(--ink-soft)] font-body px-3 py-3">No matching customer.</p>
+          ) : matches.map((c) => (
+            <button key={c.id} type="button" onClick={() => pick(c)} className="w-full text-left px-3 py-2.5 text-sm font-body hover:bg-[var(--paper-dim)] border-b border-[var(--line)] last:border-0">
+              <div className="font-medium">{c.name}</div>
+              <div className="text-xs text-[var(--ink-soft)]">{c.mobile}</div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ModeSelect({ mode, setMode, bankAccountId, setBankAccountId, bankAccounts }) {
   return (
     <div className="grid grid-cols-2 gap-3">
@@ -1246,10 +1311,7 @@ function PaymentEntry({ customers, items, receipts, topups, bankAccounts, existi
           <div className="bg-[var(--paper-dim)] rounded-md p-3 text-sm font-body">{customers.find((c) => c.id === customerId)?.name}</div>
         ) : !creatingNew ? (
           <Field label="Customer">
-            <select className={inputCls} value={customerId} onChange={e => { setCustomerId(e.target.value); setTopupItemId(""); }}>
-              <option value="">Select existing customer…</option>
-              {customers.map((c) => <option key={c.id} value={c.id}>{c.name} · {c.mobile}</option>)}
-            </select>
+            <CustomerPicker customers={customers} value={customerId} onChange={(id) => { setCustomerId(id); setTopupItemId(""); }} />
             {entryMode === "new" && <button onClick={() => setCreatingNew(true)} className="text-xs font-body text-[var(--ink)] underline font-medium mt-2 flex items-center gap-1"><Plus size={12} /> Create new customer instead</button>}
           </Field>
         ) : (
@@ -1367,10 +1429,11 @@ function ReceiptEntry({ customers, items, receipts, topups, bankAccounts, existi
       <div className="bg-white border border-[var(--line)] rounded-lg p-5 space-y-4">
         <Field label="Date"><input type="date" className={inputCls} value={date} onChange={e => setDate(e.target.value)} /></Field>
         <Field label="Customer">
-          <select disabled={isEdit} className={inputCls} value={customerId} onChange={e => { setCustomerId(e.target.value); setItemId(""); }}>
-            <option value="">Select customer…</option>
-            {customers.map((c) => <option key={c.id} value={c.id}>{c.name} · {c.mobile}</option>)}
-          </select>
+          {isEdit ? (
+            <div className="bg-[var(--paper-dim)] rounded-md p-3 text-sm font-body">{customers.find((c) => c.id === customerId)?.name}</div>
+          ) : (
+            <CustomerPicker customers={customers} value={customerId} onChange={(id) => { setCustomerId(id); setItemId(""); }} />
+          )}
         </Field>
         {customerId && (
           <Field label="Against which mortgaged item">
@@ -1600,49 +1663,50 @@ function ReportsScreen({ customers, items, receipts, topups, openLedger }) {
   );
 }
 
-/* ---------------- Dashboard drill-down lists ---------------- */
-function DashboardDetailScreen({ kind, start, end, customers, items, receipts, onBack, openLedger }) {
+/* ---------------- Dashboard drill-down lists (client-wise) ---------------- */
+function DashboardDetailScreen({ kind, start, end, customers, items, receipts, topups = [], onBack, openLedger }) {
   const custName = (id) => customers.find((c) => c.id === id)?.name || "Unknown";
   const asOf = end > todayISO() ? todayISO() : end;
+  const titles = { lent: "Money lent this period, by customer", outstanding: "Outstanding principal, by customer", received: "Interest received this period, by customer", cash: "Net cash movement this period, by customer" };
 
-  const titles = { lent: "Money lent this period", outstanding: "Outstanding principal, by item", received: "Interest received this period", cash: "Cash transactions this period" };
+  const byCustomer = {};
+  const add = (customerId, amount) => { byCustomer[customerId] = (byCustomer[customerId] || 0) + amount; };
 
-  let rows = [];
   if (kind === "lent") {
-    rows = items.filter((i) => i.date >= start && i.date <= end).sort((a, b) => (a.date < b.date ? 1 : -1))
-      .map((i) => ({ date: i.date, primary: custName(i.customerId), secondary: i.description || "Item", amount: i.principal, customerId: i.customerId }));
+    items.filter((i) => i.date >= start && i.date <= end).forEach((i) => add(i.customerId, i.principal));
+    topups.filter((t) => t.date >= start && t.date <= end).forEach((t) => add(t.customerId, t.amount));
   } else if (kind === "outstanding") {
-    rows = items.map((i) => ({ i, state: computeItemState(i, receipts.filter((r) => r.itemId === i.id), asOf) }))
-      .filter((x) => x.state.balance > 0.5)
-      .sort((a, b) => b.state.balance - a.state.balance)
-      .map(({ i, state }) => ({ date: i.date, primary: custName(i.customerId), secondary: i.description || "Item", amount: state.balance, customerId: i.customerId }));
+    items.forEach((i) => {
+      const state = computeItemState(i, receipts.filter((r) => r.itemId === i.id), asOf, topups.filter((t) => t.itemId === i.id));
+      add(i.customerId, state.balance);
+    });
   } else if (kind === "received") {
-    rows = receipts.filter((r) => r.date >= start && r.date <= end && r.interestPaid > 0).sort((a, b) => (a.date < b.date ? 1 : -1))
-      .map((r) => ({ date: r.date, primary: custName(r.customerId), secondary: `Interest received`, amount: r.interestPaid, customerId: r.customerId }));
+    receipts.filter((r) => r.date >= start && r.date <= end && r.interestPaid > 0).forEach((r) => add(r.customerId, r.interestPaid));
   } else if (kind === "cash") {
-    const lent = items.filter((i) => i.paymentMode === "cash" && i.date >= start && i.date <= end)
-      .map((i) => ({ date: i.date, primary: custName(i.customerId), secondary: "Lent (cash)", amount: -i.principal, customerId: i.customerId }));
-    const recv = receipts.filter((r) => r.paymentMode === "cash" && r.date >= start && r.date <= end)
-      .map((r) => ({ date: r.date, primary: custName(r.customerId), secondary: "Received (cash)", amount: (r.principalPaid || 0) + (r.interestPaid || 0), customerId: r.customerId }));
-    rows = [...lent, ...recv].sort((a, b) => (a.date < b.date ? 1 : -1));
+    items.filter((i) => i.paymentMode === "cash" && i.date >= start && i.date <= end).forEach((i) => add(i.customerId, -i.principal));
+    topups.filter((t) => t.paymentMode === "cash" && t.date >= start && t.date <= end).forEach((t) => add(t.customerId, -t.amount));
+    receipts.filter((r) => r.paymentMode === "cash" && r.date >= start && r.date <= end).forEach((r) => add(r.customerId, (r.principalPaid || 0) + (r.interestPaid || 0)));
   }
+
+  const rows = Object.entries(byCustomer)
+    .map(([customerId, amount]) => ({ customerId, amount }))
+    .filter((r) => Math.abs(r.amount) > 0.5)
+    .sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount));
 
   return (
     <div>
       <BackHeader title={titles[kind]} onBack={onBack} />
       <div className="overflow-x-auto">
         <table className="w-full text-sm font-body">
-          <thead><tr className="text-left text-xs text-[var(--ink-soft)] ledger-rule"><th className="py-2 pr-2">Date</th><th className="py-2 pr-2">Customer</th><th className="py-2 pr-2">Detail</th><th className="py-2 pr-2 text-right">Amount</th></tr></thead>
+          <thead><tr className="text-left text-xs text-[var(--ink-soft)] ledger-rule"><th className="py-2 pr-2">Customer</th><th className="py-2 pr-2 text-right">Amount</th></tr></thead>
           <tbody>
             {rows.map((r, idx) => (
               <tr key={idx} className="ledger-rule cursor-pointer hover:bg-[var(--paper-dim)]" onClick={() => openLedger(r.customerId)}>
-                <td className="py-2 pr-2 whitespace-nowrap">{r.date}</td>
-                <td className="py-2 pr-2 underline">{r.primary}</td>
-                <td className="py-2 pr-2">{r.secondary}</td>
-                <td className={`py-2 pr-2 text-right tabnum ${r.amount < 0 ? "text-[var(--red)]" : ""}`}>{inr(r.amount)}</td>
+                <td className="py-2.5 pr-2 underline">{custName(r.customerId)}</td>
+                <td className={`py-2.5 pr-2 text-right tabnum ${r.amount < 0 ? "text-[var(--red)]" : ""}`}>{inr(r.amount)}</td>
               </tr>
             ))}
-            {rows.length === 0 && <tr><td colSpan={4} className="py-6 text-center text-[var(--ink-soft)]">Nothing to show for this period.</td></tr>}
+            {rows.length === 0 && <tr><td colSpan={2} className="py-6 text-center text-[var(--ink-soft)]">Nothing to show for this period.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -1682,21 +1746,24 @@ function BankAccountsListScreen({ bankAccounts, items, receipts, onBack, onOpenB
 }
 
 /* ---------------- Bank Ledger ---------------- */
-function BankLedgerScreen({ bank, items, receipts, customers, onBack }) {
+function BankLedgerScreen({ bank, items, receipts, topups = [], customers, onBack }) {
   const period = usePeriod();
   const { start, end } = period;
   const custName = (id) => customers.find((c) => c.id === id)?.name || "Unknown";
 
   const rows = [];
   items.filter((i) => i.bankAccountId === bank.id && i.date >= start && i.date <= end).forEach((i) => {
-    rows.push({ date: i.date, desc: `Loan to ${custName(i.customerId)} — ${i.description || "item"}`, out: i.principal, in: 0 });
+    rows.push({ date: i.date, desc: `Loan to ${custName(i.customerId)} — ${i.description || "item"}`, payment: i.principal, receipt: 0 });
+  });
+  topups.filter((t) => t.bankAccountId === bank.id && t.date >= start && t.date <= end).forEach((t) => {
+    rows.push({ date: t.date, desc: `Additional amount to ${custName(t.customerId)}`, payment: t.amount, receipt: 0 });
   });
   receipts.filter((r) => r.bankAccountId === bank.id && r.date >= start && r.date <= end).forEach((r) => {
-    rows.push({ date: r.date, desc: `Receipt from ${custName(r.customerId)}`, out: 0, in: (r.principalPaid || 0) + (r.interestPaid || 0) });
+    rows.push({ date: r.date, desc: `Receipt from ${custName(r.customerId)}`, payment: 0, receipt: (r.principalPaid || 0) + (r.interestPaid || 0) });
   });
   rows.sort((a, b) => (a.date < b.date ? -1 : 1));
   let running = 0;
-  const withBalance = rows.map((r) => { running += r.in - r.out; return { ...r, balance: running }; });
+  const withBalance = rows.map((r) => { running += r.receipt - r.payment; return { ...r, balance: running }; });
 
   return (
     <div>
@@ -1708,14 +1775,14 @@ function BankLedgerScreen({ bank, items, receipts, customers, onBack }) {
       </div>
       <div className="overflow-x-auto">
         <table className="w-full text-sm font-body">
-          <thead><tr className="text-left text-xs text-[var(--ink-soft)] ledger-rule"><th className="py-2 pr-2">Date</th><th className="py-2 pr-2">Description</th><th className="py-2 pr-2 text-right">In</th><th className="py-2 pr-2 text-right">Out</th><th className="py-2 pr-2 text-right">Balance</th></tr></thead>
+          <thead><tr className="text-left text-xs text-[var(--ink-soft)] ledger-rule"><th className="py-2 pr-2">Date</th><th className="py-2 pr-2">Description</th><th className="py-2 pr-2 text-right">Receipt</th><th className="py-2 pr-2 text-right">Payment</th><th className="py-2 pr-2 text-right">Balance</th></tr></thead>
           <tbody>
             {withBalance.map((r, idx) => (
               <tr key={idx} className="ledger-rule">
                 <td className="py-2 pr-2 whitespace-nowrap">{r.date}</td>
                 <td className="py-2 pr-2">{r.desc}</td>
-                <td className="py-2 pr-2 text-right tabnum text-[var(--green-dark)]">{r.in ? inr(r.in) : "—"}</td>
-                <td className="py-2 pr-2 text-right tabnum text-[var(--red)]">{r.out ? inr(r.out) : "—"}</td>
+                <td className="py-2 pr-2 text-right tabnum text-[var(--green-dark)]">{r.receipt ? inr(r.receipt) : "—"}</td>
+                <td className="py-2 pr-2 text-right tabnum text-[var(--red)]">{r.payment ? inr(r.payment) : "—"}</td>
                 <td className="py-2 pr-2 text-right tabnum">{inr(r.balance)}</td>
               </tr>
             ))}
