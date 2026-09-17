@@ -46,17 +46,19 @@ function fyRange(ref = new Date()) {
   const y = ref.getMonth() >= 3 ? ref.getFullYear() : ref.getFullYear() - 1;
   return { start: `${y}-04-01`, end: `${y + 1}-03-31` };
 }
-function interestForPeriod(principal, ratePA, days, type) {
+function interestForPeriod(principal, ratePA, days, type, dayCountBasis = "365") {
   if (principal <= 0 || days <= 0) return 0;
+  const yearDays = dayCountBasis === "360" ? 360 : 365;
   if (type === "compound") {
     const months = days / 30;
     return principal * (Math.pow(1 + ratePA / 1200, months) - 1);
   }
-  return (principal * ratePA * days) / 100 / 365;
+  return (principal * ratePA * days) / 100 / yearDays;
 }
 
 // Simulate an item's payoff history; also tags each receipt with shortfall/excess
 function computeItemState(item, itemReceipts, asOfISO, itemTopups = []) {
+  const basis = item.dayCountBasis || "365";
   const events = [
     { date: item.date, type: "principal", amount: item.principal },
     ...itemTopups.map((t) => ({ date: t.date, type: "principal", amount: t.amount, topupId: t.id })),
@@ -71,7 +73,7 @@ function computeItemState(item, itemReceipts, asOfISO, itemTopups = []) {
   for (const ev of events) {
     if (ev.date > asOfISO) continue;
     const days = daysBetween(lastDate, ev.date);
-    unpaidInterest += interestForPeriod(balance, item.rate, days, item.interestType);
+    unpaidInterest += interestForPeriod(balance, item.rate, days, item.interestType, basis);
     if (ev.type === "principal") {
       balance += ev.amount;
     } else {
@@ -85,7 +87,7 @@ function computeItemState(item, itemReceipts, asOfISO, itemTopups = []) {
   }
   const tailDays = daysBetween(lastDate, asOfISO);
   if (tailDays > 0 && balance > 0.005) {
-    unpaidInterest += interestForPeriod(balance, item.rate, tailDays, item.interestType);
+    unpaidInterest += interestForPeriod(balance, item.rate, tailDays, item.interestType, basis);
   }
   return {
     balance: Math.max(0, balance),
@@ -178,12 +180,12 @@ function PhotoPicker({ value, onChange, label }) {
 
 /* ---------------- Data layer (Supabase) ---------------- */
 const mapCustomer = (r) => ({
-  id: r.id, name: r.name, photo: r.photo, mobile: r.mobile, dob: r.dob, rate: r.rate, interestType: r.interest_type,
+  id: r.id, name: r.name, photo: r.photo, mobile: r.mobile, dob: r.dob, rate: r.rate, interestType: r.interest_type, dayCountBasis: r.day_count_basis,
   govtIdNumber: r.govt_id_number, govtIdPhoto: r.govt_id_photo,
   flatNo: r.flat_no, buildingName: r.building_name, roadName: r.road_name, area: r.area,
   city: r.city, state: r.state, country: r.country, pinCode: r.pin_code, addressLegacy: r.address,
 });
-const mapItem = (r) => ({ id: r.id, customerId: r.customer_id, date: r.date, principal: Number(r.principal), description: r.description, photo: r.photo, rate: Number(r.rate), interestType: r.interest_type, paymentMode: r.payment_mode, bankAccountId: r.bank_account_id, quantity: r.quantity != null ? Number(r.quantity) : null, ratePerUnit: r.rate_per_unit != null ? Number(r.rate_per_unit) : null });
+const mapItem = (r) => ({ id: r.id, customerId: r.customer_id, date: r.date, principal: Number(r.principal), description: r.description, photo: r.photo, rate: Number(r.rate), interestType: r.interest_type, dayCountBasis: r.day_count_basis, paymentMode: r.payment_mode, bankAccountId: r.bank_account_id, quantity: r.quantity != null ? Number(r.quantity) : null, ratePerUnit: r.rate_per_unit != null ? Number(r.rate_per_unit) : null });
 const mapReceipt = (r) => ({ id: r.id, itemId: r.item_id, customerId: r.customer_id, date: r.date, principalPaid: Number(r.principal_paid), interestPaid: Number(r.interest_paid), paymentMode: r.payment_mode, bankAccountId: r.bank_account_id });
 const mapTopup = (r) => ({ id: r.id, itemId: r.item_id, customerId: r.customer_id, date: r.date, amount: Number(r.amount), paymentMode: r.payment_mode, bankAccountId: r.bank_account_id });
 const mapBank = (r) => ({ id: r.id, bankName: r.bank_name, accountNumber: r.account_number, ifsc: r.ifsc, branch: r.branch });
@@ -230,7 +232,7 @@ async function findCustomerByMobile(mobile, excludeId) {
 
 async function upsertCustomer(c) {
   const row = {
-    name: c.name, photo: c.photo, mobile: c.mobile, dob: c.dob || null, rate: c.rate, interest_type: c.interestType,
+    name: c.name, photo: c.photo, mobile: c.mobile, dob: c.dob || null, rate: c.rate, interest_type: c.interestType, day_count_basis: c.dayCountBasis || "365",
     govt_id_number: c.govtIdNumber || null, govt_id_photo: c.govtIdPhoto || null,
     flat_no: c.flatNo || null, building_name: c.buildingName || null, road_name: c.roadName || null, area: c.area || null,
     city: c.city || null, state: c.state || null, country: c.country || null, pin_code: c.pinCode || null,
@@ -250,12 +252,12 @@ async function deleteCustomerSafely(id) {
 }
 
 async function insertItem(item) {
-  const row = { customer_id: item.customerId, date: item.date, principal: item.principal, description: item.description, photo: item.photo, rate: item.rate, interest_type: item.interestType, payment_mode: item.paymentMode || "cash", bank_account_id: item.bankAccountId || null, quantity: item.quantity || null, rate_per_unit: item.ratePerUnit || null };
+  const row = { customer_id: item.customerId, date: item.date, principal: item.principal, description: item.description, photo: item.photo, rate: item.rate, interest_type: item.interestType, day_count_basis: item.dayCountBasis || "365", payment_mode: item.paymentMode || "cash", bank_account_id: item.bankAccountId || null, quantity: item.quantity || null, rate_per_unit: item.ratePerUnit || null };
   const { error } = await supabase.from("items").insert(row);
   if (error) throw error;
 }
 async function updateItemRow(id, item) {
-  const row = { date: item.date, principal: item.principal, description: item.description, photo: item.photo, rate: item.rate, interest_type: item.interestType, payment_mode: item.paymentMode || "cash", bank_account_id: item.bankAccountId || null, quantity: item.quantity || null, rate_per_unit: item.ratePerUnit || null };
+  const row = { date: item.date, principal: item.principal, description: item.description, photo: item.photo, rate: item.rate, interest_type: item.interestType, day_count_basis: item.dayCountBasis || "365", payment_mode: item.paymentMode || "cash", bank_account_id: item.bankAccountId || null, quantity: item.quantity || null, rate_per_unit: item.ratePerUnit || null };
   const { error } = await supabase.from("items").update(row).eq("id", id);
   if (error) throw error;
 }
@@ -666,10 +668,10 @@ function AuthScreen() {
                   <>
                     <Field label="Your business name"><input className={inputCls} value={businessName} onChange={e => setBusinessName(e.target.value)} placeholder="e.g. Sharma Finance" /></Field>
                     <Field label="Your name"><input className={inputCls} value={fullName} onChange={e => setFullName(e.target.value)} /></Field>
-                    <Field label="Mobile number"><input type="tel" className={inputCls} value={mobile} onChange={e => setMobile(e.target.value)} placeholder="10-digit mobile number" /></Field>
+                    <Field label="Mobile number *"><input type="tel" required className={inputCls} value={mobile} onChange={e => setMobile(e.target.value)} placeholder="10-digit mobile number" /></Field>
                   </>
                 )}
-                <Field label="Email"><input type="email" className={inputCls} value={email} onChange={e => setEmail(e.target.value)} /></Field>
+                <Field label={mode === "signup" ? "Email *" : "Email"}><input type="email" required={mode === "signup"} className={inputCls} value={email} onChange={e => setEmail(e.target.value)} /></Field>
                 <Field label="Password"><input type="password" className={inputCls} value={password} onChange={e => setPassword(e.target.value)}
                   onKeyDown={e => e.key === "Enter" && (mode === "login" ? login() : signup())} /></Field>
               </div>
@@ -696,6 +698,7 @@ function AuthScreen() {
           )}
         </div>
       </div>
+      <p className="text-center text-[var(--ink-soft)] text-xs font-body mt-6">© {new Date().getFullYear()}, Ranka Infotech LLP. All Rights Reserved.</p>
     </div>
   );
 }
@@ -1092,7 +1095,7 @@ function CustomersScreen({ customers, items, onAdd, onEdit, onOpenLedger, onDele
 }
 
 function emptyCustomer() {
-  return { id: null, name: "", photo: "", mobile: "", dob: "", rate: 24, interestType: "simple", govtIdNumber: "", govtIdPhoto: "", flatNo: "", buildingName: "", roadName: "", area: "", city: "", state: "", country: "India", pinCode: "" };
+  return { id: null, name: "", photo: "", mobile: "", dob: "", rate: 24, interestType: "simple", dayCountBasis: "365", govtIdNumber: "", govtIdPhoto: "", flatNo: "", buildingName: "", roadName: "", area: "", city: "", state: "", country: "India", pinCode: "" };
 }
 function CustomerForm({ existing, onCancel, onSaved, onOpenLightbox }) {
   const [c, setC] = useState(existing || emptyCustomer());
@@ -1135,6 +1138,12 @@ function CustomerForm({ existing, onCancel, onSaved, onOpenLightbox }) {
           <Field label="Rate of interest (% p.a.)"><input type="number" className={inputCls} value={c.rate} onChange={e => set("rate", parseFloat(e.target.value) || 0)} /></Field>
           <Field label="Interest type"><select className={inputCls} value={c.interestType} onChange={e => set("interestType", e.target.value)}><option value="simple">Simple interest</option><option value="compound">Compound interest</option></select></Field>
         </div>
+        <Field label="Interest calculated on">
+          <select className={inputCls} value={c.dayCountBasis || "365"} onChange={e => set("dayCountBasis", e.target.value)}>
+            <option value="365">365-day year</option>
+            <option value="360">360-day year (30-day month)</option>
+          </select>
+        </Field>
 
         <div className="grid grid-cols-2 gap-3">
           <Field label="Govt ID number"><input className={inputCls} value={c.govtIdNumber} onChange={e => set("govtIdNumber", e.target.value)} placeholder="Aadhaar / PAN / Voter ID" /></Field>
@@ -1284,15 +1293,16 @@ function PaymentEntry({ customers, items, receipts, topups, bankAccounts, existi
       let custId = customerId;
       let rate = customers.find((c) => c.id === custId)?.rate ?? 24;
       let interestType = customers.find((c) => c.id === custId)?.interestType ?? "simple";
+      let dayCountBasis = customers.find((c) => c.id === custId)?.dayCountBasis ?? "365";
       if (creatingNew) {
         if (!newCust.name.trim() || !newCust.mobile.trim()) { setSaving(false); return; }
         const dupe = await findCustomerByMobile(newCust.mobile, null);
         if (dupe) { setMobileErr(`This number is already used by ${dupe.name}.`); setSaving(false); return; }
         custId = await onSaveCustomer(newCust);
-        rate = newCust.rate; interestType = newCust.interestType;
+        rate = newCust.rate; interestType = newCust.interestType; dayCountBasis = newCust.dayCountBasis;
       }
       if (!custId || !amount) { setSaving(false); return; }
-      await onSave({ customerId: custId, date, principal: parseFloat(amount), description: desc, photo, rate, interestType, paymentMode: mode, bankAccountId: mode === "bank" ? bankAccountId || null : null, quantity: quantity ? parseFloat(quantity) : null, ratePerUnit: ratePerUnit ? parseFloat(ratePerUnit) : null });
+      await onSave({ customerId: custId, date, principal: parseFloat(amount), description: desc, photo, rate, interestType, dayCountBasis, paymentMode: mode, bankAccountId: mode === "bank" ? bankAccountId || null : null, quantity: quantity ? parseFloat(quantity) : null, ratePerUnit: ratePerUnit ? parseFloat(ratePerUnit) : null });
     } finally { setSaving(false); }
   };
 
@@ -1326,6 +1336,12 @@ function PaymentEntry({ customers, items, receipts, topups, bankAccounts, existi
               <Field label="Rate % p.a."><input type="number" className={inputCls} value={newCust.rate} onChange={e => setNewCust({ ...newCust, rate: parseFloat(e.target.value) || 0 })} /></Field>
               <Field label="Interest"><select className={inputCls} value={newCust.interestType} onChange={e => setNewCust({ ...newCust, interestType: e.target.value })}><option value="simple">Simple</option><option value="compound">Compound</option></select></Field>
             </div>
+            <Field label="Interest calculated on">
+              <select className={inputCls} value={newCust.dayCountBasis || "365"} onChange={e => setNewCust({ ...newCust, dayCountBasis: e.target.value })}>
+                <option value="365">365-day year</option>
+                <option value="360">360-day year (30-day month)</option>
+              </select>
+            </Field>
           </div>
         )}
 
