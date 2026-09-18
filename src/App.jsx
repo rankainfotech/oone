@@ -634,8 +634,9 @@ function AuthScreen() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4 bg-white">
-      <div className="w-full max-w-sm">
+    <div className="min-h-screen flex flex-col bg-white px-4">
+      <div className="flex-1 flex items-center justify-center">
+        <div className="w-full max-w-sm">
         <div className="text-center mb-8">
           <img src={LOGO_DATA_URI} alt="OONE" className="h-32 mx-auto object-contain" />
           <p className="text-[var(--ink-soft)] text-sm font-body mt-2">Mortgage &amp; Interest Ledger For Your Business.</p>
@@ -697,8 +698,9 @@ function AuthScreen() {
             </>
           )}
         </div>
+        </div>
       </div>
-      <p className="text-center text-[var(--ink-soft)] text-xs font-body mt-6">© {new Date().getFullYear()}, Ranka Infotech LLP. All Rights Reserved.</p>
+      <p className="text-center text-[var(--ink-soft)] text-xs font-body py-4">© {new Date().getFullYear()}, Ranka Infotech LLP. All Rights Reserved.</p>
     </div>
   );
 }
