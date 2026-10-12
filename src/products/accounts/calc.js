@@ -38,9 +38,18 @@ export function computeInvoiceTotals(lineItems, { supplyType = "intra", roundTot
   const computedLines = lineItems.map((li) => {
     const amount = round2((Number(li.qty) || 0) * (Number(li.rate) || 0));
     const { cgst: c, sgst: s, igst: i } = splitGst(amount, li.gstRate, supplyType);
-    const other = round2((amount * (Number(li.otherTaxRate) || 0)) / 100);
+    // Several named other-taxes per line (e.g. Cess, TCS), each rounded on its own like GST.
+    // A legacy single `otherTaxRate` is still honoured.
+    const taxList = Array.isArray(li.otherTaxes) ? li.otherTaxes : [];
+    const otherBreakdown = taxList
+      .filter((t) => Number(t.rate) > 0)
+      .map((t) => ({ name: t.name || "Other tax", rate: Number(t.rate), amount: round2((amount * Number(t.rate)) / 100) }));
+    if (!otherBreakdown.length && Number(li.otherTaxRate) > 0) {
+      otherBreakdown.push({ name: "Other tax", rate: Number(li.otherTaxRate), amount: round2((amount * Number(li.otherTaxRate)) / 100) });
+    }
+    const other = round2(otherBreakdown.reduce((s2, t) => s2 + t.amount, 0));
     subtotal += amount; cgst += c; sgst += s; igst += i; otherTax += other;
-    return { ...li, amount, cgstAmt: c, sgstAmt: s, igstAmt: i, otherTaxAmt: other };
+    return { ...li, amount, cgstAmt: c, sgstAmt: s, igstAmt: i, otherTaxAmt: other, otherTaxBreakdown: otherBreakdown };
   });
   subtotal = round2(subtotal); cgst = round2(cgst); sgst = round2(sgst); igst = round2(igst); otherTax = round2(otherTax);
   const preRound = round2(subtotal + cgst + sgst + igst + otherTax);
