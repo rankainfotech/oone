@@ -1,5 +1,17 @@
 import { supabase } from "../../supabaseClient";
 
+// Supabase/Postgres rejects an explicit `id: null` on insert (violates the
+// not-null id column even though a default exists) and rejects empty strings
+// "" in numeric columns. This strips both problems from a row before sending.
+function cleanRow(row, numericKeys = []) {
+  const { id, ...rest } = row;
+  const cleaned = { ...rest };
+  for (const k of numericKeys) {
+    if (cleaned[k] === "" || cleaned[k] === undefined) cleaned[k] = null;
+  }
+  return { id: id || null, cleaned };
+}
+
 // ---------------- Businesses ----------------
 export async function fetchBusinesses() {
   const { data, error } = await supabase.from("acc_businesses").select("*").order("created_at");
@@ -34,8 +46,9 @@ export async function fetchLedgers(businessId) {
   return data;
 }
 export async function saveLedger(row) {
-  if (row.id) { const { error } = await supabase.from("acc_ledgers").update(row).eq("id", row.id); if (error) throw error; return row.id; }
-  const { data, error } = await supabase.from("acc_ledgers").insert(row).select().single();
+  const { id, cleaned } = cleanRow(row, ["opening_balance"]);
+  if (id) { const { error } = await supabase.from("acc_ledgers").update(cleaned).eq("id", id); if (error) throw error; return id; }
+  const { data, error } = await supabase.from("acc_ledgers").insert(cleaned).select().single();
   if (error) throw error;
   return data.id;
 }
@@ -53,9 +66,11 @@ export async function fetchItems(businessId) {
   if (error) throw error;
   return data;
 }
+const ITEM_NUMERIC_KEYS = ["gst_rate", "other_tax_rate", "opening_qty", "opening_amount", "sale_rate", "purchase_rate"];
 export async function saveItem(row) {
-  if (row.id) { const { error } = await supabase.from("acc_items").update(row).eq("id", row.id); if (error) throw error; return row.id; }
-  const { data, error } = await supabase.from("acc_items").insert(row).select().single();
+  const { id, cleaned } = cleanRow(row, ITEM_NUMERIC_KEYS);
+  if (id) { const { error } = await supabase.from("acc_items").update(cleaned).eq("id", id); if (error) throw error; return id; }
+  const { data, error } = await supabase.from("acc_items").insert(cleaned).select().single();
   if (error) throw error;
   return data.id;
 }
@@ -120,8 +135,9 @@ export async function fetchTimesheets(businessId) {
   return data;
 }
 export async function saveTimesheet(row) {
-  if (row.id) { const { error } = await supabase.from("acc_timesheets").update(row).eq("id", row.id); if (error) throw error; return row.id; }
-  const { data, error } = await supabase.from("acc_timesheets").insert(row).select().single();
+  const { id, cleaned } = cleanRow(row, ["hours"]);
+  if (id) { const { error } = await supabase.from("acc_timesheets").update(cleaned).eq("id", id); if (error) throw error; return id; }
+  const { data, error } = await supabase.from("acc_timesheets").insert(cleaned).select().single();
   if (error) throw error;
   return data.id;
 }
