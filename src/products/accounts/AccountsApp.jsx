@@ -36,6 +36,7 @@ export default function AccountsApp() {
   const [screen, setScreen] = useState("dashboard");
   const [toast, setToast] = useState(null);
   const [lightboxUrl, setLightboxUrl] = useState(null);
+  const [bootError, setBootError] = useState("");
 
   // data caches for the current business
   const [ledgers, setLedgers] = useState([]);
@@ -52,19 +53,29 @@ export default function AccountsApp() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
+  // Re-run only when the signed-in USER changes (not on every token refresh)
+  const authKey = session === undefined ? "loading" : session ? session.user.id : "none";
   useEffect(() => {
-    if (session === undefined) return;
-    if (!session) { navigate("/products/mortgage"); return; }
+    if (authKey === "loading") return;
+    if (authKey === "none") {
+      setProfile(null); setTenant(null); setEntitlement(undefined); setBusinesses(null); setBusinessId(null); setBootError("");
+      return;
+    }
+    setBootError(""); setProfile(null); setEntitlement(undefined); setBusinesses(null); setBusinessId(null);
     (async () => {
-      const { data: prof } = await supabase.from("profiles").select("*, tenants(*)").eq("id", session.user.id).single();
-      if (!prof) return;
-      setProfile(prof);
-      setTenant(prof.tenants);
-      if (prof.is_super_admin) { setEntitlement({ status: "active", max_businesses: 999 }); return; }
-      const ent = await api.fetchAccountsEntitlement(prof.tenant_id);
-      setEntitlement(ent || null);
+      try {
+        const { data: prof, error } = await supabase.from("profiles").select("*, tenants(*)").eq("id", session.user.id).single();
+        if (error) throw error;
+        setProfile(prof);
+        setTenant(prof.tenants);
+        if (prof.is_super_admin) { setEntitlement({ status: "active", max_businesses: 999 }); return; }
+        const ent = await api.fetchAccountsEntitlement(prof.tenant_id);
+        setEntitlement(ent || null);
+      } catch (e) {
+        setBootError(e.message || "Could not load your account.");
+      }
     })();
-  }, [session]);
+  }, [authKey]);
 
   const loadBusinesses = async () => {
     const list = await api.fetchBusinesses();
@@ -88,6 +99,23 @@ export default function AccountsApp() {
     const ent = await api.fetchAccountsEntitlement(tenant.id);
     setEntitlement(ent);
   };
+
+  if (session === null) return <><style>{FONT_STYLE}</style><AccountsAuth /></>;
+  if (bootError) {
+    const network = /failed to fetch|load failed|network/i.test(bootError);
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-white px-4 text-center">
+        <style>{FONT_STYLE}</style>
+        <div className="max-w-sm">
+          <img src={LOGO_DATA_URI} className="h-12 mx-auto mb-4" />
+          <h1 className="font-display text-xl mb-2">{network ? "Can't reach the server" : "Couldn't load your account"}</h1>
+          <p className="text-sm text-gray-500 mb-5">{network ? "Check your internet connection and try again in a minute. If this keeps happening, contact support." : bootError}</p>
+          <button onClick={() => window.location.reload()} className="bg-black text-white rounded px-5 py-2.5 text-sm font-medium">Try again</button>
+          <div className="mt-4"><button onClick={() => supabase.auth.signOut()} className="text-xs text-gray-400 underline">Log out</button></div>
+        </div>
+      </div>
+    );
+  }
 
   if (session === undefined || !profile || entitlement === undefined) {
     return <div className="min-h-screen flex items-center justify-center font-body text-gray-400"><style>{FONT_STYLE}</style>Loading…</div>;
@@ -187,6 +215,89 @@ export default function AccountsApp() {
           </button>
         ))}
       </div>
+    </div>
+  );
+}
+
+/* ============ myaccountsbook sign-in / sign-up ============ */
+function AccountsAuth() {
+  const [mode, setMode] = useState("login");
+  const [email, setEmail] = useState(""); const [password, setPassword] = useState("");
+  const [businessName, setBusinessName] = useState(""); const [fullName, setFullName] = useState(""); const [mobile, setMobile] = useState("");
+  const [err, setErr] = useState(""); const [info, setInfo] = useState(""); const [busy, setBusy] = useState(false);
+  const friendly = (m) => /failed to fetch|load failed|networkerror/i.test(m || "")
+    ? "Can't reach the OONE server right now. Check your internet connection and try again in a minute." : m;
+
+  const login = async () => {
+    setErr(""); setInfo("");
+    if (!email || !password) { setErr("Enter your email and password."); return; }
+    setBusy(true);
+    try {
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) setErr(friendly(error.message));
+    } catch (e) { setErr(friendly(e.message)); }
+    finally { setBusy(false); }
+  };
+
+  const signup = async () => {
+    setErr(""); setInfo("");
+    if (!email || password.length < 6 || !businessName.trim() || !mobile.trim()) { setErr("Fill in business name, email, mobile number, and a password of 6+ characters."); return; }
+    setBusy(true);
+    try {
+      const { data: taken, error: chkErr } = await supabase.rpc("is_mobile_taken", { check_mobile: mobile.trim() });
+      if (chkErr) { setErr(friendly(chkErr.message)); return; }
+      if (taken) { setErr("This mobile number is already registered to another account."); return; }
+      const { data, error } = await supabase.auth.signUp({ email, password, options: { data: { business_name: businessName.trim(), full_name: fullName.trim(), mobile: mobile.trim() } } });
+      if (error) setErr(/already registered|already exists/i.test(error.message) ? "An account with this email already exists. Please log in instead." : friendly(error.message));
+      else if (data?.user && data.user.identities && data.user.identities.length === 0) setErr("An account with this email already exists. Please log in instead.");
+      else setInfo("Account created. If email confirmation is on, check your inbox — otherwise you're signed in already.");
+    } catch (e) { setErr(friendly(e.message)); }
+    finally { setBusy(false); }
+  };
+
+  const forgot = async () => {
+    setErr(""); setInfo("");
+    if (!email) { setErr("Enter your email first, then tap Forgot password."); return; }
+    const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: window.location.origin + "/products/mortgage" });
+    if (error) setErr(friendly(error.message)); else setInfo("If that email has an account, a reset link has been sent.");
+  };
+
+  return (
+    <div className="min-h-screen flex flex-col bg-white px-4">
+      <div className="flex-1 flex items-center justify-center py-8">
+        <div className="w-full max-w-sm">
+          <div className="text-center mb-6">
+            <img src={LOGO_DATA_URI} alt="OONE" className="h-24 mx-auto object-contain" />
+            <p className="font-display text-xl mt-2">myaccountsbook</p>
+            <p className="text-gray-500 text-sm mt-1">Accounting, invoicing &amp; GST for your business.</p>
+          </div>
+          <div className="bg-white border border-gray-200 rounded-xl p-6 shadow-sm">
+            <div className="flex gap-4 mb-4 text-sm">
+              <button onClick={() => { setMode("login"); setErr(""); setInfo(""); }} className={mode === "login" ? "font-semibold border-b-2 border-black" : "text-gray-400"}>Log in</button>
+              <button onClick={() => { setMode("signup"); setErr(""); setInfo(""); }} className={mode === "signup" ? "font-semibold border-b-2 border-black" : "text-gray-400"}>New business — Sign up</button>
+            </div>
+            <div className="space-y-3">
+              {mode === "signup" && (
+                <>
+                  <Field label="Your business name *"><input className={inputCls} value={businessName} onChange={(e) => setBusinessName(e.target.value)} /></Field>
+                  <Field label="Your name"><input className={inputCls} value={fullName} onChange={(e) => setFullName(e.target.value)} /></Field>
+                  <Field label="Mobile number *"><input type="tel" className={inputCls} value={mobile} onChange={(e) => setMobile(e.target.value)} placeholder="10-digit mobile number" /></Field>
+                </>
+              )}
+              <Field label={mode === "signup" ? "Email *" : "Email"}><input type="email" className={inputCls} value={email} onChange={(e) => setEmail(e.target.value)} /></Field>
+              <Field label="Password"><input type="password" className={inputCls} value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && (mode === "login" ? login() : signup())} /></Field>
+            </div>
+            {mode === "login" && <div className="text-right mt-2"><button onClick={forgot} className="text-xs text-gray-500 underline">Forgot password?</button></div>}
+            {err && <p className="text-xs text-red-600 mt-3">{err}</p>}
+            {info && <p className="text-xs text-green-700 mt-3">{info}</p>}
+            <button disabled={busy} onClick={mode === "login" ? login : signup} className="w-full mt-5 bg-black text-white rounded py-2.5 text-sm font-medium disabled:opacity-50">
+              {busy ? "Please wait…" : mode === "login" ? "Log in" : "Create account"}
+            </button>
+            <p className="text-[11px] text-gray-400 text-center mt-3">One OONE login works across all OONE products.</p>
+          </div>
+        </div>
+      </div>
+      <p className="text-center text-gray-400 text-xs py-4">© {new Date().getFullYear()}, Ranka Infotech LLP. All Rights Reserved.</p>
     </div>
   );
 }
