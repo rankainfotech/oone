@@ -8,6 +8,7 @@ import { supabase } from "../../supabaseClient";
 import { LOGO_DATA_URI } from "../../logo";
 import { todayISO, inr, inputCls, Field, BackHeader, PhotoPicker, Lightbox, SearchPicker } from "../../shared";
 import * as api from "./data";
+import { InvoiceForm, PartyPicker } from "./Invoice";
 import {
   computeInvoiceTotals, buildSalesInvoiceLines, buildPurchaseInvoiceLines,
   buildReceiptLines, buildPaymentLines, trialBalance, profitAndLoss, balanceSheet,
@@ -733,97 +734,9 @@ function sysLedgerMap(ledgers) {
   return m;
 }
 
-function InvoiceForm({ businessId, ledgers, items, vtype, business, onCancel, onSaved, showToast }) {
-  const sys = sysLedgerMap(ledgers);
-  const customers = ledgers.filter((l) => l.kind === "customer").map((l) => ({ id: l.id, label: l.name, sublabel: l.mobile }));
-  const [partyId, setPartyId] = useState("");
-  const [vdate, setVdate] = useState(todayISO());
-  const [voucherNo, setVoucherNo] = useState("");
-  const [poNumber, setPoNumber] = useState("");
-  const [narration, setNarration] = useState("");
-  const [supplyType, setSupplyType] = useState("intra");
-  const [lineItems, setLineItems] = useState([{ item_id: "", description: "", hsn_sac: "", qty: 1, rate: 0, gstRate: 0, otherTaxRate: 0 }]);
-  const [saving, setSaving] = useState(false);
 
-  useEffect(() => { api.nextVoucherNumber(businessId, vtype, vtype === "proforma_invoice" ? "PF-" : "INV-").then(setVoucherNo); }, [businessId, vtype]);
 
-  const totals = useMemo(() => computeInvoiceTotals(lineItems.map((li) => ({ ...li, gstRate: li.gstRate })), { supplyType }), [lineItems, supplyType]);
-
-  const setLine = (i, patch) => setLineItems((ls) => ls.map((l, idx) => idx === i ? { ...l, ...patch } : l));
-  const addLine = () => setLineItems((ls) => [...ls, { item_id: "", description: "", hsn_sac: "", qty: 1, rate: 0, gstRate: 0, otherTaxRate: 0 }]);
-  const removeLine = (i) => setLineItems((ls) => ls.filter((_, idx) => idx !== i));
-  const pickItem = (i, itemId) => {
-    const it = items.find((x) => x.id === itemId);
-    if (!it) return setLine(i, { item_id: itemId });
-    setLine(i, { item_id: itemId, description: it.name, hsn_sac: it.hsn_sac, rate: it.sale_rate || 0, gstRate: it.gst_rate, otherTaxRate: it.other_tax_rate });
-  };
-
-  const save = async () => {
-    if (!partyId || !voucherNo.trim()) { showToast("Select a customer and a voucher number."); return; }
-    setSaving(true);
-    try {
-      const voucher = { business_id: businessId, vtype, voucher_no: voucherNo.trim(), vdate, party_ledger_id: partyId, main_ledger_id: sys.sales,
-        po_number: poNumber, narration, supply_type: supplyType, subtotal: totals.subtotal, cgst: totals.cgst, sgst: totals.sgst, igst: totals.igst,
-        other_tax: totals.otherTax, round_off: totals.roundOff, total: totals.total };
-      const apiItems = totals.lines.map((li, idx) => ({ line_no: idx + 1, item_id: li.item_id || null, description: li.description, hsn_sac: li.hsn_sac,
-        qty: li.qty, rate: li.rate, amount: li.amount, gst_rate: li.gstRate, other_tax_rate: li.otherTaxRate, cgst_amt: li.cgstAmt, sgst_amt: li.sgstAmt, igst_amt: li.igstAmt, other_tax_amt: li.otherTaxAmt }));
-      const lines = buildSalesInvoiceLines({ partyLedgerId: partyId, salesLedgerId: sys.sales, gstLedgers: sys, invoiceTotals: totals });
-      await api.saveVoucher(voucher, apiItems, lines);
-      showToast(vtype === "proforma_invoice" ? "Proforma invoice saved" : "Invoice saved");
-      onSaved();
-    } catch (e) { showToast(e.message); }
-    finally { setSaving(false); }
-  };
-
-  return (
-    <div>
-      <BackHeader title={vtype === "proforma_invoice" ? "New Proforma Invoice" : "New Tax Invoice"} onBack={onCancel} />
-      <div className="bg-white border border-gray-200 rounded-lg p-5 space-y-4 max-w-3xl">
-        <div className="grid sm:grid-cols-3 gap-3">
-          <Field label="Date of invoice"><input type="date" className={inputCls} value={vdate} onChange={(e) => setVdate(e.target.value)} /></Field>
-          <Field label="Invoice No."><input className={inputCls} value={voucherNo} onChange={(e) => setVoucherNo(e.target.value)} /></Field>
-          <Field label="Purchase Order No."><input className={inputCls} value={poNumber} onChange={(e) => setPoNumber(e.target.value)} /></Field>
-        </div>
-        <div className="grid sm:grid-cols-2 gap-3">
-          <Field label="Customer"><SearchPicker options={customers} value={partyId} onChange={setPartyId} placeholder="Type name or mobile…" /></Field>
-          <Field label="Supply type (for GST)"><select className={inputCls} value={supplyType} onChange={(e) => setSupplyType(e.target.value)}><option value="intra">Intra-state (CGST+SGST)</option><option value="inter">Inter-state (IGST)</option></select></Field>
-        </div>
-
-        <div className="border-t border-gray-200 pt-3">
-          <p className="text-xs font-medium text-gray-500 mb-2">Line items</p>
-          <div className="space-y-2">
-            {lineItems.map((li, i) => (
-              <div key={i} className="grid grid-cols-12 gap-1.5 items-start bg-gray-50 p-2 rounded">
-                <div className="col-span-12 sm:col-span-4"><SearchPicker options={items.map((it) => ({ id: it.id, label: it.name, sublabel: it.hsn_sac }))} value={li.item_id} onChange={(id) => pickItem(i, id)} placeholder="Item…" /></div>
-                <input className={inputCls + " col-span-6 sm:col-span-2"} placeholder="HSN/SAC" value={li.hsn_sac} onChange={(e) => setLine(i, { hsn_sac: e.target.value })} />
-                <input type="number" className={inputCls + " col-span-3 sm:col-span-1"} placeholder="Qty" value={li.qty} onChange={(e) => setLine(i, { qty: parseFloat(e.target.value) || 0 })} />
-                <input type="number" className={inputCls + " col-span-3 sm:col-span-2"} placeholder="Rate" value={li.rate} onChange={(e) => setLine(i, { rate: parseFloat(e.target.value) || 0 })} />
-                <input type="number" className={inputCls + " col-span-3 sm:col-span-1"} placeholder="GST%" value={li.gstRate} onChange={(e) => setLine(i, { gstRate: parseFloat(e.target.value) || 0 })} />
-                <div className="col-span-3 sm:col-span-1 text-sm tabnum pt-2 text-right">{inr(round2((li.qty||0)*(li.rate||0)))}</div>
-                <button onClick={() => removeLine(i)} className="col-span-12 sm:col-span-1 text-gray-400 hover:text-red-600 flex justify-end sm:justify-center pt-1"><Trash2 size={14} /></button>
-              </div>
-            ))}
-          </div>
-          <button onClick={addLine} className="mt-2 text-xs text-black underline flex items-center gap-1"><Plus size={12} /> Add line</button>
-        </div>
-
-        <div className="flex justify-end">
-          <div className="w-64 text-sm space-y-1">
-            <div className="flex justify-between"><span>Subtotal</span><span className="tabnum">{inr(totals.subtotal)}</span></div>
-            {supplyType === "intra" ? (<><div className="flex justify-between"><span>CGST</span><span className="tabnum">{inr(totals.cgst)}</span></div><div className="flex justify-between"><span>SGST</span><span className="tabnum">{inr(totals.sgst)}</span></div></>) : (<div className="flex justify-between"><span>IGST</span><span className="tabnum">{inr(totals.igst)}</span></div>)}
-            <div className="flex justify-between text-gray-400"><span>Round off</span><span className="tabnum">{inr(totals.roundOff)}</span></div>
-            <div className="flex justify-between font-semibold border-t border-gray-200 pt-1"><span>Total</span><span className="tabnum">{inr(totals.total)}</span></div>
-          </div>
-        </div>
-        <Field label="Remarks"><textarea rows={2} className={inputCls} value={narration} onChange={(e) => setNarration(e.target.value)} /></Field>
-        <p className="text-[11px] text-gray-400">E-Invoice and E-Way Bill generation need a GSP API connection to go live — not wired up yet.</p>
-        <button disabled={saving} onClick={save} className="w-full bg-black disabled:opacity-50 text-white rounded py-2.5 text-sm font-medium">{saving ? "Saving…" : "Save Invoice"}</button>
-      </div>
-    </div>
-  );
-}
-
-function OtherIncomeForm({ businessId, ledgers, onCancel, onSaved, showToast }) {
+function OtherIncomeForm({ businessId, ledgers, onCancel, onSaved, showToast, reload }) {
   const sys = sysLedgerMap(ledgers);
   const parties = ledgers.map((l) => ({ id: l.id, label: l.name, sublabel: l.kind }));
   const [partyId, setPartyId] = useState("");
@@ -853,7 +766,7 @@ function OtherIncomeForm({ businessId, ledgers, onCancel, onSaved, showToast }) 
           <Field label="Date"><input type="date" className={inputCls} value={vdate} onChange={(e) => setVdate(e.target.value)} /></Field>
           <Field label="Journal Entry No."><input className={inputCls} value={voucherNo} onChange={(e) => setVoucherNo(e.target.value)} /></Field>
         </div>
-        <Field label="Customer / Vendor / Ledger"><SearchPicker options={parties} value={partyId} onChange={setPartyId} /></Field>
+        <Field label="Customer / Vendor / Ledger"><PartyPicker kind="customer" allowAll ledgers={ledgers} value={partyId} onChange={setPartyId} businessId={businessId} reload={reload} showToast={showToast} /></Field>
         <div className="grid grid-cols-2 gap-3">
           <Field label="Amount"><input type="number" className={inputCls} value={amount} onChange={(e) => setAmount(e.target.value)} /></Field>
           <Field label="GST %"><input type="number" className={inputCls} value={gstRate} onChange={(e) => setGstRate(parseFloat(e.target.value) || 0)} /></Field>
@@ -888,21 +801,75 @@ function VoucherListScreen({ title, vouchers, ledgers, onOpenNew, newLabel, extr
   );
 }
 
-function SalesScreen({ businessId, ledgers, items, vouchers, lines, allocations, business, reload, showToast, onOpenLightbox }) {
-  const [mode, setMode] = useState("list"); // list | invoice | proforma | otherIncome
+function SalesScreen({ businessId, ledgers, items, vouchers, allocations, business, reload, showToast, onOpenLightbox }) {
+  const [mode, setMode] = useState("list");
+  const [cfg, setCfg] = useState(null);
+  const [busyId, setBusyId] = useState(null);
   const salesVouchers = vouchers.filter((v) => ["sales_invoice", "proforma_invoice"].includes(v.vtype));
-  if (mode === "invoice") return <InvoiceForm businessId={businessId} ledgers={ledgers} items={items} vtype="sales_invoice" business={business} onCancel={() => setMode("list")} onSaved={async () => { await reload(); setMode("list"); }} showToast={showToast} />;
-  if (mode === "proforma") return <InvoiceForm businessId={businessId} ledgers={ledgers} items={items} vtype="proforma_invoice" business={business} onCancel={() => setMode("list")} onSaved={async () => { await reload(); setMode("list"); }} showToast={showToast} />;
-  if (mode === "otherIncome") return <OtherIncomeForm businessId={businessId} ledgers={ledgers} onCancel={() => setMode("list")} onSaved={async () => { await reload(); setMode("list"); }} showToast={showToast} />;
+  const nameOf = (id) => ledgers.find((l) => l.id === id)?.name || "—";
+  const metaOf = (v) => v.meta || {};
+  const statusOf = (v) => {
+    const m = metaOf(v);
+    if (m.status === "draft") return { label: "Draft", cls: "bg-gray-100 text-gray-600" };
+    if (v.vtype === "proforma_invoice") return m.converted_to ? { label: "Converted", cls: "bg-green-50 text-green-700" } : { label: "Proforma", cls: "bg-blue-50 text-blue-700" };
+    const paid = allocations.filter((a) => a.invoice_voucher_id === v.id).reduce((s, a) => s + Number(a.amount), 0);
+    if (paid >= v.total - 0.5) return { label: "Paid", cls: "bg-green-50 text-green-700" };
+    if (paid > 0) return { label: "Partly paid", cls: "bg-yellow-50 text-yellow-700" };
+    return { label: "Unpaid", cls: "bg-red-50 text-red-700" };
+  };
+  const load = async (v) => { const [its, atts] = await Promise.all([api.fetchVoucherItems(v.id), api.fetchAttachments(v.id)]); return { voucher: v, items: its, attachments: atts }; };
+  const openNew = (vtype) => { setCfg({ vtype, initial: null, convertFrom: null }); setMode("form"); };
+  const openExisting = async (v) => { setBusyId(v.id); try { setCfg({ vtype: v.vtype, initial: await load(v), convertFrom: null }); setMode("form"); } catch (e) { showToast(e.message); } finally { setBusyId(null); } };
+  const convert = async (v) => { setBusyId(v.id); try { const init = await load(v); setCfg({ vtype: "sales_invoice", initial: { ...init, attachments: [] }, convertFrom: v }); setMode("form"); } catch (e) { showToast(e.message); } finally { setBusyId(null); } };
+  const remove = async (v) => {
+    if (!window.confirm(`Delete ${v.voucher_no}? Its accounting entries are removed too. This cannot be undone.`)) return;
+    try { await api.deleteVoucher(v.id); await reload(); showToast("Deleted"); } catch (e) { showToast(e.message); }
+  };
+  const done = async () => { await reload(); setMode("list"); setCfg(null); };
+
+  if (mode === "form") return <InvoiceForm key={cfg.initial?.voucher?.id || "new" + cfg.vtype} businessId={businessId} ledgers={ledgers} items={items} vtype={cfg.vtype} business={business} initial={cfg.initial} convertFrom={cfg.convertFrom} reload={reload} onCancel={() => { setMode("list"); setCfg(null); }} onSaved={done} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
+  if (mode === "otherIncome") return <OtherIncomeForm businessId={businessId} ledgers={ledgers} reload={reload} onCancel={() => setMode("list")} onSaved={done} showToast={showToast} />;
+
   return (
-    <VoucherListScreen title="Sales" vouchers={salesVouchers} ledgers={ledgers} onOpenNew={() => setMode("invoice")} newLabel="New Invoice"
-      extraButtons={<><button onClick={() => setMode("proforma")} className="border border-gray-300 rounded px-3 py-2 text-sm">Proforma</button><button onClick={() => setMode("otherIncome")} className="border border-gray-300 rounded px-3 py-2 text-sm">Other Income</button></>} />
+    <div>
+      <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+        <h2 className="font-display text-xl">Sales</h2>
+        <div className="flex gap-2">
+          <button onClick={() => openNew("proforma_invoice")} className="border border-gray-300 rounded px-3 py-2 text-sm">Proforma</button>
+          <button onClick={() => setMode("otherIncome")} className="border border-gray-300 rounded px-3 py-2 text-sm">Other Income</button>
+          <button onClick={() => openNew("sales_invoice")} className="bg-black text-white rounded px-3.5 py-2 text-sm font-medium flex items-center gap-1.5"><Plus size={15} /> New Invoice</button>
+        </div>
+      </div>
+      {salesVouchers.length === 0 ? <p className="text-sm text-gray-400 text-center py-10">No invoices yet.</p> : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead><tr className="text-left text-xs text-gray-400 border-b border-gray-200"><th className="py-2 pr-2">Date</th><th className="py-2 pr-2">No.</th><th className="py-2 pr-2">Customer</th><th className="py-2 pr-2">Status</th><th className="py-2 pr-2 text-right">Total</th><th className="py-2"></th></tr></thead>
+            <tbody>{salesVouchers.map((v) => {
+              const st = statusOf(v); const m = metaOf(v);
+              return (
+                <tr key={v.id} className="border-b border-gray-100 hover:bg-gray-50 cursor-pointer" onClick={() => openExisting(v)}>
+                  <td className="py-2.5 pr-2 whitespace-nowrap">{v.vdate}</td>
+                  <td className="py-2.5 pr-2">{v.voucher_no}</td>
+                  <td className="py-2.5 pr-2">{nameOf(v.party_ledger_id)}</td>
+                  <td className="py-2.5 pr-2"><span className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${st.cls}`}>{st.label}</span>{m.send_later && <span className="ml-1 text-[10px] bg-purple-50 text-purple-700 px-2 py-0.5 rounded-full">To send</span>}</td>
+                  <td className="py-2.5 pr-2 text-right tabnum">{inr(v.total)}</td>
+                  <td className="py-2.5 text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                    {v.vtype === "proforma_invoice" && !m.converted_to && m.status !== "draft" && <button disabled={busyId === v.id} onClick={() => convert(v)} className="text-xs text-blue-700 underline mr-3">Convert to Tax Invoice</button>}
+                    <button onClick={() => remove(v)} className="text-gray-300 hover:text-red-600"><Trash2 size={14} /></button>
+                  </td>
+                </tr>
+              );
+            })}</tbody>
+          </table>
+        </div>
+      )}
+    </div>
   );
 }
 
 /* ============ Payments & Receipts ============ */
 function outstandingInvoices(vouchers, allocations, partyId) {
-  return vouchers.filter((v) => v.party_ledger_id === partyId && ["sales_invoice", "purchase_invoice"].includes(v.vtype)).map((v) => {
+  return vouchers.filter((v) => v.party_ledger_id === partyId && ["sales_invoice", "purchase_invoice"].includes(v.vtype) && v.meta?.status !== "draft").map((v) => {
     const allocated = allocations.filter((a) => a.invoice_voucher_id === v.id).reduce((s, a) => s + Number(a.amount), 0);
     return { ...v, outstanding: round2(v.total - allocated) };
   }).filter((v) => v.outstanding > 0.5);
@@ -911,11 +878,11 @@ function outstandingInvoices(vouchers, allocations, partyId) {
 function PaymentsReceiptsScreen({ businessId, ledgers, vouchers, allocations, reload, showToast }) {
   const [mode, setMode] = useState("list");
   const prVouchers = vouchers.filter((v) => ["receipt", "payment"].includes(v.vtype));
-  if (mode === "new") return <ReceiptPaymentForm businessId={businessId} ledgers={ledgers} vouchers={vouchers} allocations={allocations} onCancel={() => setMode("list")} onSaved={async () => { await reload(); setMode("list"); }} showToast={showToast} />;
+  if (mode === "new") return <ReceiptPaymentForm businessId={businessId} ledgers={ledgers} vouchers={vouchers} allocations={allocations} reload={reload} onCancel={() => setMode("list")} onSaved={async () => { await reload(); setMode("list"); }} showToast={showToast} />;
   return <VoucherListScreen title="Payments & Receipts" vouchers={prVouchers} ledgers={ledgers} onOpenNew={() => setMode("new")} newLabel="New Entry" />;
 }
 
-function ReceiptPaymentForm({ businessId, ledgers, vouchers, allocations, onCancel, onSaved, showToast }) {
+function ReceiptPaymentForm({ businessId, ledgers, vouchers, allocations, onCancel, onSaved, showToast, reload }) {
   const sys = sysLedgerMap(ledgers);
   const [kind, setKind] = useState("receipt");
   const [partyId, setPartyId] = useState("");
@@ -953,7 +920,7 @@ function ReceiptPaymentForm({ businessId, ledgers, vouchers, allocations, onCanc
           <button onClick={() => { setKind("payment"); setPartyId(""); }} className={kind === "payment" ? "font-semibold border-b-2 border-black" : "text-gray-400"}>Payment</button>
         </div>
         <Field label="Date"><input type="date" className={inputCls} value={vdate} onChange={(e) => setVdate(e.target.value)} /></Field>
-        <Field label={kind === "receipt" ? "Customer" : "Vendor"}><SearchPicker options={parties} value={partyId} onChange={(v) => { setPartyId(v); setAllocInvoiceId(""); }} /></Field>
+        <Field label={kind === "receipt" ? "Customer" : "Vendor"}><PartyPicker kind={kind === "receipt" ? "customer" : "vendor"} ledgers={ledgers} value={partyId} onChange={(v) => { setPartyId(v); setAllocInvoiceId(""); }} businessId={businessId} reload={reload} showToast={showToast} /></Field>
         <Field label="Amount"><input type="number" className={inputCls} value={amount} onChange={(e) => setAmount(e.target.value)} /></Field>
         <div className="grid grid-cols-2 gap-3">
           <Field label="Mode"><select className={inputCls} value={mode} onChange={(e) => setMode(e.target.value)}><option value="cash">Cash</option><option value="bank">Bank</option></select></Field>
@@ -975,7 +942,7 @@ function ReceiptPaymentForm({ businessId, ledgers, vouchers, allocations, onCanc
 }
 
 /* ============ Purchases: Purchase Invoice / Expense / Debit Note ============ */
-function PurchaseInvoiceForm({ businessId, ledgers, items, vtype, onCancel, onSaved, showToast, onOpenLightbox }) {
+function PurchaseInvoiceForm({ businessId, ledgers, items, vtype, onCancel, onSaved, showToast, onOpenLightbox, reload }) {
   const sys = sysLedgerMap(ledgers);
   const vendors = ledgers.filter((l) => l.kind === "vendor").map((l) => ({ id: l.id, label: l.name, sublabel: l.mobile }));
   const parties = ledgers.map((l) => ({ id: l.id, label: l.name, sublabel: l.kind }));
@@ -1008,7 +975,7 @@ function PurchaseInvoiceForm({ businessId, ledgers, items, vtype, onCancel, onSa
           <Field label="Date"><input type="date" className={inputCls} value={vdate} onChange={(e) => setVdate(e.target.value)} /></Field>
           <Field label="Journal Entry No."><input className={inputCls} value={voucherNo} onChange={(e) => setVoucherNo(e.target.value)} /></Field>
         </div>
-        <Field label="Customer / Vendor / Ledger"><SearchPicker options={isExpense ? parties : vendors} value={partyId} onChange={setPartyId} /></Field>
+        <Field label="Customer / Vendor / Ledger"><PartyPicker kind="vendor" allowAll={isExpense} ledgers={ledgers} value={partyId} onChange={setPartyId} businessId={businessId} reload={reload} showToast={showToast} /></Field>
         <div className="grid grid-cols-3 gap-3">
           <Field label="Amount"><input type="number" className={inputCls} value={amount} onChange={(e) => setAmount(e.target.value)} /></Field>
           <Field label="GST %"><input type="number" className={inputCls} value={gstRate} onChange={(e) => setGstRate(parseFloat(e.target.value) || 0)} /></Field>
@@ -1026,9 +993,9 @@ function PurchaseInvoiceForm({ businessId, ledgers, items, vtype, onCancel, onSa
 function PurchasesScreen({ businessId, ledgers, items, vouchers, business, reload, showToast, onOpenLightbox }) {
   const [mode, setMode] = useState("list");
   const purchaseVouchers = vouchers.filter((v) => ["purchase_invoice", "expense", "debit_note"].includes(v.vtype));
-  if (mode === "purchase") return <PurchaseInvoiceForm businessId={businessId} ledgers={ledgers} items={items} vtype="purchase_invoice" onCancel={() => setMode("list")} onSaved={async () => { await reload(); setMode("list"); }} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
-  if (mode === "expense") return <PurchaseInvoiceForm businessId={businessId} ledgers={ledgers} items={items} vtype="expense" onCancel={() => setMode("list")} onSaved={async () => { await reload(); setMode("list"); }} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
-  if (mode === "debit") return <PurchaseInvoiceForm businessId={businessId} ledgers={ledgers} items={items} vtype="debit_note" onCancel={() => setMode("list")} onSaved={async () => { await reload(); setMode("list"); }} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
+  if (mode === "purchase") return <PurchaseInvoiceForm businessId={businessId} ledgers={ledgers} items={items} vtype="purchase_invoice" reload={reload} onCancel={() => setMode("list")} onSaved={async () => { await reload(); setMode("list"); }} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
+  if (mode === "expense") return <PurchaseInvoiceForm businessId={businessId} ledgers={ledgers} items={items} vtype="expense" reload={reload} onCancel={() => setMode("list")} onSaved={async () => { await reload(); setMode("list"); }} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
+  if (mode === "debit") return <PurchaseInvoiceForm businessId={businessId} ledgers={ledgers} items={items} vtype="debit_note" reload={reload} onCancel={() => setMode("list")} onSaved={async () => { await reload(); setMode("list"); }} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
   return (
     <VoucherListScreen title="Purchases" vouchers={purchaseVouchers} ledgers={ledgers} onOpenNew={() => setMode("purchase")} newLabel="Purchase Invoice"
       extraButtons={<><button onClick={() => setMode("expense")} className="border border-gray-300 rounded px-3 py-2 text-sm">Expense</button><button onClick={() => setMode("debit")} className="border border-gray-300 rounded px-3 py-2 text-sm">Debit Note</button></>} />
