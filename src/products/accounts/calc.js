@@ -29,33 +29,67 @@ export function splitGst(amount, gstRate, supplyType) {
 }
 
 /**
- * Computes full line-item and invoice-level totals for a Sales/Purchase
- * style voucher: quantity x rate lines, each with its own GST% and
- * other-tax%, rolled up to invoice subtotal/tax/total, with rounding.
+ * Computes line-item and invoice-level totals for a Sales/Purchase style voucher.
+ * Order of operations (same as standard Indian invoicing):
+ *   qty x rate  ->  discount  ->  taxable value  ->  GST + other taxes  ->  rounding.
+ * Options:
+ *   discountType 'percent' | 'amount', discountValue
+ *   extraTaxes [{name, rate}]  invoice-level other taxes, charged on the net taxable value
  */
-export function computeInvoiceTotals(lineItems, { supplyType = "intra", roundTotal = true } = {}) {
-  let subtotal = 0, cgst = 0, sgst = 0, igst = 0, otherTax = 0;
-  const computedLines = lineItems.map((li) => {
-    const amount = round2((Number(li.qty) || 0) * (Number(li.rate) || 0));
-    const { cgst: c, sgst: s, igst: i } = splitGst(amount, li.gstRate, supplyType);
+export function computeInvoiceTotals(lineItems, { supplyType = "intra", roundTotal = true, discountType = "percent", discountValue = 0, extraTaxes = [] } = {}) {
+  const grossAmounts = lineItems.map((li) => round2((Number(li.qty) || 0) * (Number(li.rate) || 0)));
+  const gross = round2(grossAmounts.reduce((a, b) => a + b, 0));
+
+  // --- discount, spread across lines so each line's tax is computed on what is really charged ---
+  const dv = Math.max(0, Number(discountValue) || 0);
+  let lineDiscounts;
+  if (discountType === "amount") {
+    const D = Math.min(dv, gross);
+    lineDiscounts = [];
+    let used = 0;
+    grossAmounts.forEach((amt, i) => {
+      if (i === grossAmounts.length - 1) lineDiscounts.push(round2(D - used));
+      else { const d = gross > 0 ? round2((D * amt) / gross) : 0; lineDiscounts.push(d); used = round2(used + d); }
+    });
+  } else {
+    const pct = Math.min(dv, 100);
+    lineDiscounts = grossAmounts.map((amt) => round2((amt * pct) / 100));
+  }
+
+  let subtotal = 0, cgst = 0, sgst = 0, igst = 0, otherTax = 0, discountTotal = 0;
+  const otherByName = {};
+  const computedLines = lineItems.map((li, idx) => {
+    const amount = grossAmounts[idx];
+    const discountAmt = Math.min(lineDiscounts[idx], amount);
+    const taxable = round2(amount - discountAmt);
+    const { cgst: c, sgst: s, igst: i } = splitGst(taxable, li.gstRate, supplyType);
     // Several named other-taxes per line (e.g. Cess, TCS), each rounded on its own like GST.
-    // A legacy single `otherTaxRate` is still honoured.
     const taxList = Array.isArray(li.otherTaxes) ? li.otherTaxes : [];
     const otherBreakdown = taxList
       .filter((t) => Number(t.rate) > 0)
-      .map((t) => ({ name: t.name || "Other tax", rate: Number(t.rate), amount: round2((amount * Number(t.rate)) / 100) }));
+      .map((t) => ({ name: t.name || "Other tax", rate: Number(t.rate), amount: round2((taxable * Number(t.rate)) / 100) }));
     if (!otherBreakdown.length && Number(li.otherTaxRate) > 0) {
-      otherBreakdown.push({ name: "Other tax", rate: Number(li.otherTaxRate), amount: round2((amount * Number(li.otherTaxRate)) / 100) });
+      otherBreakdown.push({ name: "Other tax", rate: Number(li.otherTaxRate), amount: round2((taxable * Number(li.otherTaxRate)) / 100) });
     }
     const other = round2(otherBreakdown.reduce((s2, t) => s2 + t.amount, 0));
-    subtotal += amount; cgst += c; sgst += s; igst += i; otherTax += other;
-    return { ...li, amount, cgstAmt: c, sgstAmt: s, igstAmt: i, otherTaxAmt: other, otherTaxBreakdown: otherBreakdown };
+    otherBreakdown.forEach((t) => { otherByName[t.name] = round2((otherByName[t.name] || 0) + t.amount); });
+    subtotal += taxable; cgst += c; sgst += s; igst += i; otherTax += other; discountTotal += discountAmt;
+    return { ...li, amount, discountAmt, taxable, cgstAmt: c, sgstAmt: s, igstAmt: i, otherTaxAmt: other, otherTaxBreakdown: otherBreakdown };
   });
-  subtotal = round2(subtotal); cgst = round2(cgst); sgst = round2(sgst); igst = round2(igst); otherTax = round2(otherTax);
+  subtotal = round2(subtotal); cgst = round2(cgst); sgst = round2(sgst); igst = round2(igst); otherTax = round2(otherTax); discountTotal = round2(discountTotal);
+
+  // invoice-level other taxes, charged on the net taxable value
+  const extraBreakdown = (extraTaxes || [])
+    .filter((t) => Number(t.rate) > 0)
+    .map((t) => ({ name: t.name || "Other tax", rate: Number(t.rate), amount: round2((subtotal * Number(t.rate)) / 100) }));
+  extraBreakdown.forEach((t) => { otherByName[t.name] = round2((otherByName[t.name] || 0) + t.amount); otherTax = round2(otherTax + t.amount); });
+
   const preRound = round2(subtotal + cgst + sgst + igst + otherTax);
   const total = roundTotal ? Math.round(preRound) : preRound;
   const roundOff = round2(total - preRound);
-  return { lines: computedLines, subtotal, cgst, sgst, igst, otherTax, roundOff, total };
+  const otherTaxSummary = Object.entries(otherByName).map(([name, amount]) => ({ name, amount }));
+  // `subtotal` is the NET taxable value (after discount) - this is what is posted to the Sales ledger.
+  return { lines: computedLines, grossSubtotal: gross, discountTotal, subtotal, cgst, sgst, igst, otherTax, otherTaxSummary, roundOff, total };
 }
 
 /**
@@ -214,4 +248,84 @@ export function balanceSheet(ledgers, lines, asOfDate, booksStartDate, lineDates
   totalAssets = round2(totalAssets);
   totalLiabilities = round2(totalLiabilities + pl.netProfit);
   return { assets, liabilities, totalAssets, totalLiabilities, balanced: Math.abs(totalAssets - totalLiabilities) < 0.01, netProfit: pl.netProfit };
+}
+
+
+/**
+ * Converts engine ledger lines ({ledgerId,...}) into the shape the database
+ * function expects ({ledger_id,...}). Refuses to send a line with no ledger.
+ */
+export function toDbLines(lines) {
+  return lines.map((l, i) => {
+    const ledger_id = l.ledgerId ?? l.ledger_id;
+    if (!ledger_id) throw new Error("A ledger needed to post this entry was not found. Please reload the page; if it continues, the business's built-in ledgers may be missing.");
+    return { line_no: i + 1, ledger_id, debit: round2(l.debit || 0), credit: round2(l.credit || 0), narration: l.narration || null };
+  });
+}
+
+// ---------------- Place of supply (decides IGST vs CGST+SGST automatically) ----------------
+
+export const STATE_CODES = {
+  "Jammu & Kashmir": "01", "Himachal Pradesh": "02", "Punjab": "03", "Chandigarh": "04", "Uttarakhand": "05", "Haryana": "06",
+  "Delhi": "07", "Rajasthan": "08", "Uttar Pradesh": "09", "Bihar": "10", "Sikkim": "11", "Arunachal Pradesh": "12", "Nagaland": "13",
+  "Manipur": "14", "Mizoram": "15", "Tripura": "16", "Meghalaya": "17", "Assam": "18", "West Bengal": "19", "Jharkhand": "20",
+  "Odisha": "21", "Chhattisgarh": "22", "Madhya Pradesh": "23", "Gujarat": "24", "Dadra & Nagar Haveli and Daman & Diu": "26",
+  "Maharashtra": "27", "Karnataka": "29", "Goa": "30", "Lakshadweep": "31", "Kerala": "32", "Tamil Nadu": "33", "Puducherry": "34",
+  "Andaman & Nicobar Islands": "35", "Telangana": "36", "Andhra Pradesh": "37", "Ladakh": "38",
+};
+export const INDIAN_STATES = Object.keys(STATE_CODES).sort();
+const STATE_ALIASES = {
+  "orissa": "21", "new delhi": "07", "nct of delhi": "07", "delhi ncr": "07", "pondicherry": "34", "uttaranchal": "05",
+  "jammu and kashmir": "01", "dadra and nagar haveli": "26", "daman and diu": "26", "dadra & nagar haveli": "26", "daman & diu": "26",
+  "andaman and nicobar islands": "35", "andaman & nicobar": "35", "andaman and nicobar": "35",
+  "dadra and nagar haveli and daman and diu": "26",
+};
+const normState = (n) => String(n || "").toLowerCase().replace(/&/g, "and").replace(/\s+/g, " ").trim();
+const NAME_TO_CODE = Object.fromEntries(Object.entries(STATE_CODES).map(([n, c]) => [normState(n), c]));
+const VALID_CODES = new Set(Object.values(STATE_CODES));
+
+/** GST state code from a GSTIN's first two digits, else from the state name. null if unknown. */
+export function stateCodeOf(gstin, stateName) {
+  const g = String(gstin || "").trim();
+  if (/^\d{2}/.test(g) && VALID_CODES.has(g.slice(0, 2))) return g.slice(0, 2);
+  const key = normState(stateName);
+  return NAME_TO_CODE[key] || STATE_ALIASES[key] || null;
+}
+export const stateNameOfCode = (code) => Object.keys(STATE_CODES).find((n) => STATE_CODES[n] === code) || "";
+
+/** Same state -> CGST+SGST ('intra'); different state -> IGST ('inter'). Unknown -> 'intra' with known:false. */
+export function detectSupplyType(business, party) {
+  const b = stateCodeOf(business?.gstin, business?.state);
+  const c = stateCodeOf(party?.gstin, party?.state);
+  if (!b || !c) return { type: "intra", known: false, businessState: stateNameOfCode(b), partyState: stateNameOfCode(c) };
+  return { type: b === c ? "intra" : "inter", known: true, businessState: stateNameOfCode(b), partyState: stateNameOfCode(c) };
+}
+
+// ---------------- Amount in words (Indian system) ----------------
+const ONES = ["", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen", "Nineteen"];
+const TENS = ["", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety"];
+function below1000(n) {
+  let out = "";
+  if (n >= 100) { out += ONES[Math.floor(n / 100)] + " Hundred"; n %= 100; if (n) out += " "; }
+  if (n >= 20) { out += TENS[Math.floor(n / 10)]; if (n % 10) out += " " + ONES[n % 10]; }
+  else if (n > 0) out += ONES[n];
+  return out;
+}
+export function amountInWords(amount) {
+  const abs = Math.abs(Number(amount) || 0);
+  let rupees = Math.floor(abs + 1e-9);
+  let paise = Math.round((abs - rupees) * 100);
+  if (paise === 100) { rupees += 1; paise = 0; }
+  if (rupees === 0 && paise === 0) return "Rupees Zero Only";
+  const parts = [];
+  const crore = Math.floor(rupees / 10000000); rupees %= 10000000;
+  const lakh = Math.floor(rupees / 100000); rupees %= 100000;
+  const thousand = Math.floor(rupees / 1000); rupees %= 1000;
+  if (crore) parts.push(below1000(crore) + " Crore");
+  if (lakh) parts.push(below1000(lakh) + " Lakh");
+  if (thousand) parts.push(below1000(thousand) + " Thousand");
+  if (rupees) parts.push(below1000(rupees));
+  let words = parts.length ? "Rupees " + parts.join(" ") : "Rupees Zero";
+  if (paise) words += " and " + below1000(paise) + " Paise";
+  return words + " Only";
 }
