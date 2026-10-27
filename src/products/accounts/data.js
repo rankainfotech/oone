@@ -1,4 +1,5 @@
 import { supabase } from "../../supabaseClient";
+import { toDbLines } from "./calc";
 
 // Supabase/Postgres rejects an explicit `id: null` on insert (violates the
 // not-null id column even though a default exists) and rejects empty strings
@@ -106,8 +107,9 @@ export async function fetchAllocations(businessId) {
   return data;
 }
 export async function saveVoucher(voucher, items, lines, allocs = []) {
+  // The accounting engine labels ledger lines {ledgerId}; the database expects {ledger_id}.
   const { data, error } = await supabase.rpc("acc_save_voucher", {
-    p_voucher: voucher, p_items: items, p_lines: lines, p_allocs: allocs,
+    p_voucher: voucher, p_items: items, p_lines: toDbLines(lines), p_allocs: allocs,
   });
   if (error) throw error;
   return data;
@@ -160,5 +162,56 @@ export async function insertBankRows(rows) {
 }
 export async function updateBankRow(id, fields) {
   const { error } = await supabase.from("acc_bank_rows").update(fields).eq("id", id);
+  if (error) throw error;
+}
+
+export async function updateVoucherMeta(id, meta) {
+  const { error } = await supabase.from("acc_vouchers").update({ meta }).eq("id", id);
+  if (error) throw error;
+}
+
+// ---------------- Salespersons ----------------
+export async function fetchSalespersons(businessId) {
+  const { data, error } = await supabase.from("acc_salespersons").select("*").eq("business_id", businessId).order("name");
+  if (error) throw error;
+  return data;
+}
+export async function saveSalesperson(row) {
+  const { id, cleaned } = cleanRow(row);
+  if (id) { const { error } = await supabase.from("acc_salespersons").update(cleaned).eq("id", id); if (error) throw error; return id; }
+  const { data, error } = await supabase.from("acc_salespersons").insert(cleaned).select().single();
+  if (error) throw error;
+  return data.id;
+}
+export async function deleteSalesperson(id) {
+  const { error } = await supabase.from("acc_salespersons").delete().eq("id", id);
+  if (error) throw error;
+}
+
+// ---------------- Invoice attachments ----------------
+export async function fetchAttachments(voucherId) {
+  const { data, error } = await supabase.from("acc_attachments").select("id,file_name,mime_type,size_bytes").eq("voucher_id", voucherId).order("created_at");
+  if (error) throw error;
+  return data;
+}
+export async function fetchAttachmentData(id) {
+  const { data, error } = await supabase.from("acc_attachments").select("data,file_name,mime_type").eq("id", id).single();
+  if (error) throw error;
+  return data;
+}
+export const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024;
+export async function uploadAttachment(businessId, voucherId, file) {
+  if (file.size > MAX_ATTACHMENT_BYTES) throw new Error(`${file.name} is larger than 2 MB.`);
+  const data = await new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+  const { error } = await supabase.from("acc_attachments").insert({ business_id: businessId, voucher_id: voucherId, file_name: file.name, mime_type: file.type, size_bytes: file.size, data });
+  if (error) throw error;
+}
+export async function deleteAttachment(id) {
+  const { error } = await supabase.from("acc_attachments").delete().eq("id", id);
   if (error) throw error;
 }
