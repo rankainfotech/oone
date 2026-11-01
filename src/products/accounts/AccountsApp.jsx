@@ -2,13 +2,14 @@ import React, { useState, useEffect, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Users, Truck, Package, BookOpen, Receipt, ShoppingCart, FileText,
-  ArrowLeft, LogOut, Plus, Trash2, Pencil, X, Building2, ChevronDown, AlertTriangle,
+  ArrowLeft, LogOut, Plus, Trash2, Pencil, X, Building2, ChevronDown, AlertTriangle, Settings as SettingsIcon,
 } from "lucide-react";
 import { supabase } from "../../supabaseClient";
 import { LOGO_DATA_URI } from "../../logo";
 import { todayISO, inr, inputCls, Field, BackHeader, PhotoPicker, Lightbox, SearchPicker } from "../../shared";
 import * as api from "./data";
 import { InvoiceForm, PartyPicker } from "./Invoice";
+import SettingsScreen from "./Settings";
 import {
   computeInvoiceTotals, buildSalesInvoiceLines, buildPurchaseInvoiceLines,
   buildReceiptLines, buildPaymentLines, trialBalance, profitAndLoss, balanceSheet,
@@ -164,6 +165,7 @@ export default function AccountsApp() {
     { id: "purchases", label: "Purchases", icon: ShoppingCart },
     { id: "ledgers", label: "Ledgers", icon: BookOpen },
     { id: "reports", label: "Reports", icon: LayoutDashboard },
+    { id: "settings", label: "Settings", icon: SettingsIcon },
     { id: "profile", label: "Business Profile", icon: Building2 },
   ];
 
@@ -201,10 +203,11 @@ export default function AccountsApp() {
         <main className="max-w-6xl mx-auto px-4 pt-5 pb-10">
           {screen === "dashboard" && <Dashboard ledgers={ledgers} lines={lines} vouchers={vouchers} business={business} openScreen={setScreen} />}
           {screen === "ledgers" && <LedgersScreen ledgers={ledgers} items={items} businessId={businessId} reload={loadBusinessData} showToast={showToast} onOpenLightbox={setLightboxUrl} />}
-          {screen === "sales" && <SalesScreen businessId={businessId} ledgers={ledgers} items={items} vouchers={vouchers} lines={lines} allocations={allocations} business={business} reload={loadBusinessData} showToast={showToast} onOpenLightbox={setLightboxUrl} />}
+          {screen === "sales" && <SalesScreen goSettings={() => setScreen("settings")} businessId={businessId} ledgers={ledgers} items={items} vouchers={vouchers} lines={lines} allocations={allocations} business={business} reload={loadBusinessData} showToast={showToast} onOpenLightbox={setLightboxUrl} />}
           {screen === "paymentsReceipts" && <PaymentsReceiptsScreen businessId={businessId} ledgers={ledgers} vouchers={vouchers} allocations={allocations} reload={loadBusinessData} showToast={showToast} />}
           {screen === "purchases" && <PurchasesScreen businessId={businessId} ledgers={ledgers} items={items} vouchers={vouchers} business={business} reload={loadBusinessData} showToast={showToast} onOpenLightbox={setLightboxUrl} />}
           {screen === "reports" && <ReportsScreen ledgers={ledgers} lines={lines} vouchers={vouchers} business={business} />}
+          {screen === "settings" && <SettingsScreen business={business} businessId={businessId} showToast={showToast} reloadBusinesses={loadBusinesses} />}
           {screen === "profile" && <BusinessProfileScreen business={business} reload={loadBusinesses} showToast={showToast} />}
         </main>
       </div>
@@ -801,17 +804,20 @@ function VoucherListScreen({ title, vouchers, ledgers, onOpenNew, newLabel, extr
   );
 }
 
-function SalesScreen({ businessId, ledgers, items, vouchers, allocations, business, reload, showToast, onOpenLightbox }) {
+function SalesScreen({ businessId, ledgers, items, vouchers, lines, allocations, business, reload, showToast, onOpenLightbox, goSettings }) {
   const [mode, setMode] = useState("list");
+  const [tab, setTab] = useState("invoices"); // invoices | proforma  (kept apart: a proforma is not a sale)
   const [cfg, setCfg] = useState(null);
   const [busyId, setBusyId] = useState(null);
-  const salesVouchers = vouchers.filter((v) => ["sales_invoice", "proforma_invoice"].includes(v.vtype));
+  const isPf = tab === "proforma";
+  const shown = vouchers.filter((v) => v.vtype === (isPf ? "proforma_invoice" : "sales_invoice"));
   const nameOf = (id) => ledgers.find((l) => l.id === id)?.name || "—";
   const metaOf = (v) => v.meta || {};
+  const convertedInv = (v) => (metaOf(v).converted_to ? vouchers.find((x) => x.id === metaOf(v).converted_to) : null);
   const statusOf = (v) => {
     const m = metaOf(v);
     if (m.status === "draft") return { label: "Draft", cls: "bg-gray-100 text-gray-600" };
-    if (v.vtype === "proforma_invoice") return m.converted_to ? { label: "Converted", cls: "bg-green-50 text-green-700" } : { label: "Proforma", cls: "bg-blue-50 text-blue-700" };
+    if (v.vtype === "proforma_invoice") { const c = convertedInv(v); return c ? { label: `Converted to ${c.voucher_no}`, cls: "bg-green-50 text-green-700" } : { label: "Open", cls: "bg-blue-50 text-blue-700" }; }
     const paid = allocations.filter((a) => a.invoice_voucher_id === v.id).reduce((s, a) => s + Number(a.amount), 0);
     if (paid >= v.total - 0.5) return { label: "Paid", cls: "bg-green-50 text-green-700" };
     if (paid > 0) return { label: "Partly paid", cls: "bg-yellow-50 text-yellow-700" };
@@ -822,30 +828,34 @@ function SalesScreen({ businessId, ledgers, items, vouchers, allocations, busine
   const openExisting = async (v) => { setBusyId(v.id); try { setCfg({ vtype: v.vtype, initial: await load(v), convertFrom: null }); setMode("form"); } catch (e) { showToast(e.message); } finally { setBusyId(null); } };
   const convert = async (v) => { setBusyId(v.id); try { const init = await load(v); setCfg({ vtype: "sales_invoice", initial: { ...init, attachments: [] }, convertFrom: v }); setMode("form"); } catch (e) { showToast(e.message); } finally { setBusyId(null); } };
   const remove = async (v) => {
-    if (!window.confirm(`Delete ${v.voucher_no}? Its accounting entries are removed too. This cannot be undone.`)) return;
+    if (!window.confirm(`Delete ${v.voucher_no}? ${v.vtype === "sales_invoice" ? "Its accounting entries and payments are removed too. " : ""}This cannot be undone.`)) return;
     try { await api.deleteVoucher(v.id); await reload(); showToast("Deleted"); } catch (e) { showToast(e.message); }
   };
   const done = async () => { await reload(); setMode("list"); setCfg(null); };
 
-  if (mode === "form") return <InvoiceForm key={cfg.initial?.voucher?.id || "new" + cfg.vtype} businessId={businessId} ledgers={ledgers} items={items} vtype={cfg.vtype} business={business} initial={cfg.initial} convertFrom={cfg.convertFrom} reload={reload} onCancel={() => { setMode("list"); setCfg(null); }} onSaved={done} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
+  if (mode === "form") return <InvoiceForm key={cfg.initial?.voucher?.id || "new" + cfg.vtype + (cfg.convertFrom?.id || "")} businessId={businessId} ledgers={ledgers} items={items} vtype={cfg.vtype} business={business} initial={cfg.initial} convertFrom={cfg.convertFrom} vouchers={vouchers} allocations={allocations} lines={lines} reload={reload} goSettings={goSettings} onCancel={() => { setMode("list"); setCfg(null); }} onSaved={done} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
   if (mode === "otherIncome") return <OtherIncomeForm businessId={businessId} ledgers={ledgers} reload={reload} onCancel={() => setMode("list")} onSaved={done} showToast={showToast} />;
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
         <h2 className="font-display text-xl">Sales</h2>
         <div className="flex gap-2">
-          <button onClick={() => openNew("proforma_invoice")} className="border border-gray-300 rounded px-3 py-2 text-sm">Proforma</button>
           <button onClick={() => setMode("otherIncome")} className="border border-gray-300 rounded px-3 py-2 text-sm">Other Income</button>
-          <button onClick={() => openNew("sales_invoice")} className="bg-black text-white rounded px-3.5 py-2 text-sm font-medium flex items-center gap-1.5"><Plus size={15} /> New Invoice</button>
+          <button onClick={() => openNew(isPf ? "proforma_invoice" : "sales_invoice")} className="bg-black text-white rounded px-3.5 py-2 text-sm font-medium flex items-center gap-1.5"><Plus size={15} /> {isPf ? "New Proforma" : "New Invoice"}</button>
         </div>
       </div>
-      {salesVouchers.length === 0 ? <p className="text-sm text-gray-400 text-center py-10">No invoices yet.</p> : (
+      <div className="flex gap-4 border-b border-gray-200 mb-3 text-sm">
+        <button onClick={() => setTab("invoices")} className={`pb-2 ${!isPf ? "font-semibold border-b-2 border-black" : "text-gray-400"}`}>Tax Invoices</button>
+        <button onClick={() => setTab("proforma")} className={`pb-2 ${isPf ? "font-semibold border-b-2 border-black" : "text-gray-400"}`}>Proforma Invoices</button>
+      </div>
+      {isPf && <p className="text-xs text-gray-500 mb-3">Proforma invoices are quotations only. They are kept apart from sales and never touch your accounts, GST or reports until converted to a Tax Invoice.</p>}
+      {shown.length === 0 ? <p className="text-sm text-gray-400 text-center py-10">{isPf ? "No proforma invoices yet." : "No invoices yet."}</p> : (
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead><tr className="text-left text-xs text-gray-400 border-b border-gray-200"><th className="py-2 pr-2">Date</th><th className="py-2 pr-2">No.</th><th className="py-2 pr-2">Customer</th><th className="py-2 pr-2">Status</th><th className="py-2 pr-2 text-right">Total</th><th className="py-2"></th></tr></thead>
-            <tbody>{salesVouchers.map((v) => {
-              const st = statusOf(v); const m = metaOf(v);
+            <tbody>{shown.map((v) => {
+              const st = statusOf(v); const m = metaOf(v); const conv = convertedInv(v);
               return (
                 <tr key={v.id} className="border-b border-gray-100 hover:bg-gray-50 cursor-pointer" onClick={() => openExisting(v)}>
                   <td className="py-2.5 pr-2 whitespace-nowrap">{v.vdate}</td>
@@ -854,8 +864,8 @@ function SalesScreen({ businessId, ledgers, items, vouchers, allocations, busine
                   <td className="py-2.5 pr-2"><span className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${st.cls}`}>{st.label}</span>{m.send_later && <span className="ml-1 text-[10px] bg-purple-50 text-purple-700 px-2 py-0.5 rounded-full">To send</span>}</td>
                   <td className="py-2.5 pr-2 text-right tabnum">{inr(v.total)}</td>
                   <td className="py-2.5 text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
-                    {v.vtype === "proforma_invoice" && !m.converted_to && m.status !== "draft" && <button disabled={busyId === v.id} onClick={() => convert(v)} className="text-xs text-blue-700 underline mr-3">Convert to Tax Invoice</button>}
-                    <button onClick={() => remove(v)} className="text-gray-300 hover:text-red-600"><Trash2 size={14} /></button>
+                    {v.vtype === "proforma_invoice" && !conv && m.status !== "draft" && <button disabled={busyId === v.id} onClick={() => convert(v)} className="text-xs text-blue-700 underline mr-3">Convert to Tax Invoice</button>}
+                    {!conv && <button aria-label={`Delete ${v.voucher_no}`} onClick={() => remove(v)} className="text-gray-300 hover:text-red-600"><Trash2 size={14} /></button>}
                   </td>
                 </tr>
               );
