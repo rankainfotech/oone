@@ -215,3 +215,45 @@ export async function deleteAttachment(id) {
   const { error } = await supabase.from("acc_attachments").delete().eq("id", id);
   if (error) throw error;
 }
+
+// ---------------- Other Taxes master ----------------
+export async function fetchOtherTaxes(businessId) {
+  const { data, error } = await supabase.from("acc_other_taxes").select("*").eq("business_id", businessId).order("name");
+  if (error) throw error;
+  return data;
+}
+export async function saveOtherTax(row) {
+  const { id, cleaned } = cleanRow(row, ["value"]);
+  if (id) { const { error } = await supabase.from("acc_other_taxes").update(cleaned).eq("id", id); if (error) throw error; return id; }
+  const { data, error } = await supabase.from("acc_other_taxes").insert(cleaned).select().single();
+  if (error) throw error;
+  return data.id;
+}
+export async function deleteOtherTax(id) {
+  const { error } = await supabase.from("acc_other_taxes").delete().eq("id", id);
+  if (error) throw error;
+}
+
+// ---------------- Payments against an invoice (can be split across Cash and Bank) ----------------
+export async function recordInvoicePayment(invoiceId, receiptVoucher, lines) {
+  const { data, error } = await supabase.rpc("acc_record_invoice_payment", { p_invoice: invoiceId, p_receipt: receiptVoucher, p_lines: toDbLines(lines) });
+  if (error) throw error;
+  return data;
+}
+
+// ---------------- Proforma -> Tax invoice (the database allows this only once) ----------------
+export async function convertProforma(proformaId, voucher, items, lines) {
+  const { data, error } = await supabase.rpc("acc_convert_proforma", { p_proforma: proformaId, p_voucher: voucher, p_items: items, p_lines: toDbLines(lines) });
+  if (error) throw error;
+  return data;
+}
+
+// ---------------- Business settings (custom fields, charges, default terms...) ----------------
+export async function updateBusinessSettings(businessId, patch) {
+  const { data, error } = await supabase.from("acc_businesses").select("settings").eq("id", businessId).single();
+  if (error) throw error;
+  const merged = { ...(data.settings || {}), ...patch };
+  const { error: e2 } = await supabase.from("acc_businesses").update({ settings: merged }).eq("id", businessId);
+  if (e2) throw e2;
+  return merged;
+}
