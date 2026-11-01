@@ -29,41 +29,52 @@ export function splitGst(amount, gstRate, supplyType) {
 }
 
 /**
- * Computes line-item and invoice-level totals for a Sales/Purchase style voucher.
- * Order of operations (same as standard Indian invoicing):
- *   qty x rate  ->  discount  ->  taxable value  ->  GST + other taxes  ->  rounding.
- * Options:
- *   discountType 'percent' | 'amount', discountValue
- *   extraTaxes [{name, rate}]  invoice-level other taxes, charged on the net taxable value
+ * Line total <-> rate. When a user types the line TOTAL, the rate is derived from the quantity
+ * (and stays exact, so qty x rate gives the typed total back). Returns null when qty is 0.
  */
-export function computeInvoiceTotals(lineItems, { supplyType = "intra", roundTotal = true, discountType = "percent", discountValue = 0, extraTaxes = [] } = {}) {
+export function rateFromTotal(total, qty) {
+  const q = Number(qty) || 0;
+  if (!q) return null;
+  return (Number(total) || 0) / q;
+}
+
+/**
+ * Computes line-item and invoice-level totals for a Sales/Purchase style voucher.
+ * Order of operations (standard Indian invoicing):
+ *   qty x rate -> discounts -> taxable value (+ additional charges) -> GST + other taxes -> rounding.
+ * Options:
+ *   discountType 'percent'|'amount', discountValue         the main discount
+ *   extraDiscounts [{name, mode:'percent'|'fixed', value}]  further named discounts
+ *   charges        [{name, mode:'percent'|'fixed', value, gstRate}]  additional charges (freight, packing...)
+ *   extraTaxes     [{name, type:'percent'|'fixed_invoice'|'fixed_unit', value}]  invoice-level other taxes
+ */
+export function computeInvoiceTotals(lineItems, { supplyType = "intra", roundTotal = true, discountType = "percent", discountValue = 0, extraDiscounts = [], charges = [], extraTaxes = [] } = {}) {
   const grossAmounts = lineItems.map((li) => round2((Number(li.qty) || 0) * (Number(li.rate) || 0)));
   const gross = round2(grossAmounts.reduce((a, b) => a + b, 0));
+  const qtyTotal = round2(lineItems.reduce((a, li) => a + (Number(li.qty) || 0), 0));
 
-  // --- discount, spread across lines so each line's tax is computed on what is really charged ---
+  // --- all discounts combined, then spread across lines so each line's tax is on what is really charged ---
   const dv = Math.max(0, Number(discountValue) || 0);
-  let lineDiscounts;
-  if (discountType === "amount") {
-    const D = Math.min(dv, gross);
-    lineDiscounts = [];
-    let used = 0;
-    grossAmounts.forEach((amt, i) => {
-      if (i === grossAmounts.length - 1) lineDiscounts.push(round2(D - used));
-      else { const d = gross > 0 ? round2((D * amt) / gross) : 0; lineDiscounts.push(d); used = round2(used + d); }
-    });
-  } else {
-    const pct = Math.min(dv, 100);
-    lineDiscounts = grossAmounts.map((amt) => round2((amt * pct) / 100));
-  }
+  const mainD = discountType === "amount" ? dv : round2((gross * Math.min(dv, 100)) / 100);
+  const extraDiscountBreakdown = (extraDiscounts || [])
+    .map((d) => ({ name: d.name || "Discount", amount: d.mode === "percent" ? round2((gross * Math.min(Math.max(Number(d.value) || 0, 0), 100)) / 100) : round2(Math.max(Number(d.value) || 0, 0)) }))
+    .filter((d) => d.amount > 0);
+  const D = Math.min(gross, round2(mainD + extraDiscountBreakdown.reduce((a, d) => a + d.amount, 0)));
+  const lineDiscounts = [];
+  let used = 0;
+  grossAmounts.forEach((amt, i) => {
+    if (i === grossAmounts.length - 1) lineDiscounts.push(Math.min(amt, round2(D - used)));
+    else { const d = gross > 0 ? round2((D * amt) / gross) : 0; lineDiscounts.push(Math.min(amt, d)); used = round2(used + d); }
+  });
 
   let subtotal = 0, cgst = 0, sgst = 0, igst = 0, otherTax = 0, discountTotal = 0;
   const otherByName = {};
   const computedLines = lineItems.map((li, idx) => {
     const amount = grossAmounts[idx];
-    const discountAmt = Math.min(lineDiscounts[idx], amount);
+    const discountAmt = lineDiscounts[idx];
     const taxable = round2(amount - discountAmt);
     const { cgst: c, sgst: s, igst: i } = splitGst(taxable, li.gstRate, supplyType);
-    // Several named other-taxes per line (e.g. Cess, TCS), each rounded on its own like GST.
+    // Several named other-taxes per line (e.g. Cess), each rounded on its own like GST.
     const taxList = Array.isArray(li.otherTaxes) ? li.otherTaxes : [];
     const otherBreakdown = taxList
       .filter((t) => Number(t.rate) > 0)
@@ -73,23 +84,42 @@ export function computeInvoiceTotals(lineItems, { supplyType = "intra", roundTot
     }
     const other = round2(otherBreakdown.reduce((s2, t) => s2 + t.amount, 0));
     otherBreakdown.forEach((t) => { otherByName[t.name] = round2((otherByName[t.name] || 0) + t.amount); });
-    subtotal += taxable; cgst += c; sgst += s; igst += i; otherTax += other; discountTotal += discountAmt;
+    subtotal += amount - discountAmt; cgst += c; sgst += s; igst += i; otherTax += other; discountTotal += discountAmt;
     return { ...li, amount, discountAmt, taxable, cgstAmt: c, sgstAmt: s, igstAmt: i, otherTaxAmt: other, otherTaxBreakdown: otherBreakdown };
   });
   subtotal = round2(subtotal); cgst = round2(cgst); sgst = round2(sgst); igst = round2(igst); otherTax = round2(otherTax); discountTotal = round2(discountTotal);
 
-  // invoice-level other taxes, charged on the net taxable value
-  const extraBreakdown = (extraTaxes || [])
-    .filter((t) => Number(t.rate) > 0)
-    .map((t) => ({ name: t.name || "Other tax", rate: Number(t.rate), amount: round2((subtotal * Number(t.rate)) / 100) }));
-  extraBreakdown.forEach((t) => { otherByName[t.name] = round2((otherByName[t.name] || 0) + t.amount); otherTax = round2(otherTax + t.amount); });
+  // --- additional charges: added to the taxable value, with their own GST rate if any ---
+  const lineNet = subtotal;
+  const chargeBreakdown = [];
+  let chargesTotal = 0;
+  (charges || []).forEach((ch) => {
+    const v = Math.max(Number(ch.value) || 0, 0);
+    const amount = ch.mode === "percent" ? round2((lineNet * v) / 100) : round2(v);
+    if (amount <= 0) return;
+    const t = splitGst(amount, ch.gstRate, supplyType);
+    chargeBreakdown.push({ name: ch.name || "Charge", amount, gstRate: Number(ch.gstRate) || 0, cgst: t.cgst, sgst: t.sgst, igst: t.igst });
+    chargesTotal = round2(chargesTotal + amount);
+    subtotal = round2(subtotal + amount); cgst = round2(cgst + t.cgst); sgst = round2(sgst + t.sgst); igst = round2(igst + t.igst);
+  });
+
+  // --- invoice-level other taxes, chosen from the Other Taxes master ---
+  (extraTaxes || []).forEach((t) => {
+    const v = Math.max(Number(t.value ?? t.rate) || 0, 0);
+    if (!v) return;
+    const type = t.type || "percent";
+    const amount = type === "fixed_invoice" ? round2(v) : type === "fixed_unit" ? round2(v * qtyTotal) : round2((subtotal * v) / 100);
+    if (amount <= 0) return;
+    otherByName[t.name || "Other tax"] = round2((otherByName[t.name || "Other tax"] || 0) + amount);
+    otherTax = round2(otherTax + amount);
+  });
 
   const preRound = round2(subtotal + cgst + sgst + igst + otherTax);
   const total = roundTotal ? Math.round(preRound) : preRound;
   const roundOff = round2(total - preRound);
   const otherTaxSummary = Object.entries(otherByName).map(([name, amount]) => ({ name, amount }));
-  // `subtotal` is the NET taxable value (after discount) - this is what is posted to the Sales ledger.
-  return { lines: computedLines, grossSubtotal: gross, discountTotal, subtotal, cgst, sgst, igst, otherTax, otherTaxSummary, roundOff, total };
+  // `subtotal` = net taxable value (after discounts, including additional charges): what is posted to the Sales ledger.
+  return { lines: computedLines, grossSubtotal: gross, qtyTotal, discountTotal, extraDiscountBreakdown, chargeBreakdown, chargesTotal, subtotal, cgst, sgst, igst, otherTax, otherTaxSummary, roundOff, total };
 }
 
 /**
@@ -328,4 +358,110 @@ export function amountInWords(amount) {
   let words = parts.length ? "Rupees " + parts.join(" ") : "Rupees Zero";
   if (paise) words += " and " + below1000(paise) + " Paise";
   return words + " Only";
+}
+
+
+/** A receipt split across several Cash / Bank ledgers: Dr each part, Cr the customer for the sum. */
+export function buildSplitReceiptLines({ partyLedgerId, parts }) {
+  const clean = (parts || []).map((p) => ({ ledgerId: p.ledgerId ?? p.ledger_id, amount: round2(p.amount) })).filter((p) => p.amount > 0);
+  if (!clean.length) throw new Error("Enter an amount to receive.");
+  if (clean.some((p) => !p.ledgerId)) throw new Error("Choose a bank account for every Bank amount.");
+  const total = round2(clean.reduce((s, p) => s + p.amount, 0));
+  return [...clean.map((p) => ({ ledgerId: p.ledgerId, debit: p.amount, credit: 0 })), { ledgerId: partyLedgerId, debit: 0, credit: total }];
+}
+
+/** Signed ledger balance: positive = Dr (receivable), negative = Cr. Includes the opening balance. */
+export function ledgerBalanceOf(ledger, lines) {
+  if (!ledger) return 0;
+  const opening = Number(ledger.opening_balance) || 0;
+  let bal = ledger.opening_side === "Cr" ? -opening : opening;
+  for (const l of lines) if (l.ledger_id === ledger.id) bal += (Number(l.debit) || 0) - (Number(l.credit) || 0);
+  return round2(bal);
+}
+
+// ---------------- configurable fields: safe formula evaluator ----------------
+// A tiny arithmetic parser (numbers, field names, + - * / ( ) and %). It NEVER uses eval or Function,
+// so a formula typed into Settings can only ever do arithmetic on known fields.
+export function slugKey(label) {
+  let k = String(label || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  if (!k) k = "field";
+  if (/^[0-9]/.test(k)) k = "f_" + k;
+  return k;
+}
+
+function tokenize(expr) {
+  const tokens = [];
+  const re = /\s*(?:(\d+\.?\d*|\.\d+)|([A-Za-z_][A-Za-z0-9_]*)|(.))/gy;
+  let m;
+  while (re.lastIndex < expr.length && (m = re.exec(expr))) {
+    if (m[1] !== undefined) tokens.push({ t: "num", v: parseFloat(m[1]) });
+    else if (m[2] !== undefined) tokens.push({ t: "id", v: m[2] });
+    else if ("+-*/()%".includes(m[3])) tokens.push({ t: "op", v: m[3] });
+    else if (m[3].trim() !== "") throw new Error(`Unexpected character "${m[3]}"`);
+  }
+  return tokens;
+}
+
+function parseAndEval(expr, vars) {
+  const tokens = tokenize(String(expr || ""));
+  if (!tokens.length) throw new Error("Formula is empty");
+  let pos = 0;
+  const peek = () => tokens[pos];
+  const take = () => tokens[pos++];
+  function primary() {
+    const t = take();
+    if (!t) throw new Error("Formula ended unexpectedly");
+    if (t.t === "num") return t.v;
+    if (t.t === "id") {
+      if (!Object.prototype.hasOwnProperty.call(vars, t.v)) throw new Error(`Unknown field "${t.v}"`);
+      const v = Number(vars[t.v]);
+      return Number.isFinite(v) ? v : 0;
+    }
+    if (t.v === "(") { const v = expr_(); const c = take(); if (!c || c.v !== ")") throw new Error("Missing )"); return v; }
+    throw new Error(`Unexpected "${t.v}"`);
+  }
+  function factor() {
+    const t = peek();
+    if (t && t.t === "op" && (t.v === "-" || t.v === "+")) { take(); const v = factor(); return t.v === "-" ? -v : v; }
+    let v = primary();
+    while (peek() && peek().t === "op" && peek().v === "%") { take(); v = v / 100; }
+    return v;
+  }
+  function term() {
+    let v = factor();
+    while (peek() && peek().t === "op" && (peek().v === "*" || peek().v === "/")) {
+      const op = take().v; const r = factor();
+      if (op === "/") { if (r === 0) throw new Error("Division by zero"); v = v / r; } else v = v * r;
+    }
+    return v;
+  }
+  function expr_() {
+    let v = term();
+    while (peek() && peek().t === "op" && (peek().v === "+" || peek().v === "-")) { const op = take().v; const r = term(); v = op === "+" ? v + r : v - r; }
+    return v;
+  }
+  const result = expr_();
+  if (pos < tokens.length) throw new Error(`Unexpected "${tokens[pos].v}"`);
+  return result;
+}
+
+/** Evaluates a formula with the given field values. Returns a number, or null if it cannot be evaluated. */
+export function evalFormula(expr, vars) {
+  try { const v = parseAndEval(expr, vars || {}); return Number.isFinite(v) ? v : null; } catch (e) { return null; }
+}
+/** Returns null if the formula is valid for these field names, else a readable error message. */
+export function validateFormula(expr, allowedKeys) {
+  const vars = {}; (allowedKeys || []).forEach((k) => { vars[k] = 1; });
+  try { parseAndEval(expr, vars); return null; } catch (e) { return e.message === "Division by zero" ? null : e.message; }
+}
+/** Evaluates calculated fields in order (later fields may use earlier ones). */
+export function computeCalculatedFields(defs, vars) {
+  const out = {}; const scope = { ...vars };
+  for (const d of defs || []) {
+    if (d.type !== "calculated") continue;
+    const v = evalFormula(d.formula || "", scope);
+    out[d.key] = v === null ? null : Math.round(v * 10000) / 10000;
+    if (v !== null) scope[d.key] = out[d.key];
+  }
+  return out;
 }
