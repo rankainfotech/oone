@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import { Plus, Trash2, Pencil } from "lucide-react";
 import { inputCls, Field } from "../../shared";
 import * as api from "./data";
-import { slugKey, validateFormula } from "./calc";
+import { slugKey, validateFormula, PAPER_SIZES, normalizeNumbering, formatVoucherNo, gstNumberProblem } from "./calc";
 
 const RESERVED_LINE = ["qty", "rate", "amount"];
 const RESERVED_HEADER = ["gross", "taxable", "tax", "total", "qty"];
@@ -11,13 +11,13 @@ const TYPE_LABEL = { text: "Text", number: "Number", calculated: "Calculated" };
 const TAX_LABEL = { percent: "% of taxable value", fixed_invoice: "Fixed amount per invoice", fixed_unit: "Fixed amount per unit" };
 
 export default function SettingsScreen({ business, businessId, showToast, reloadBusinesses }) {
-  const [tab, setTab] = useState("fields");
+  const [tab, setTab] = useState("format");
   const settings = business?.settings || {};
   const saveSettings = async (patch, msg = "Saved") => {
     try { await api.updateBusinessSettings(businessId, patch); await reloadBusinesses(); showToast(msg); return true; }
     catch (e) { showToast(e.message); return false; }
   };
-  const tabs = [["fields", "Invoice fields"], ["taxes", "Other taxes"], ["adjust", "Charges & discounts"], ["terms", "Terms & notes"]];
+  const tabs = [["format", "Bill format"], ["fields", "Invoice fields"], ["taxes", "Other taxes"], ["adjust", "Charges & discounts"], ["terms", "Terms & notes"]];
   return (
     <div className="max-w-3xl">
       <h2 className="font-display text-xl mb-1">Invoice Settings</h2>
@@ -25,6 +25,7 @@ export default function SettingsScreen({ business, businessId, showToast, reload
       <div className="flex gap-4 border-b border-gray-200 mb-5 text-sm overflow-x-auto">
         {tabs.map(([k, l]) => <button key={k} onClick={() => setTab(k)} className={`pb-2.5 whitespace-nowrap ${tab === k ? "font-semibold border-b-2 border-black" : "text-gray-400"}`}>{l}</button>)}
       </div>
+      {tab === "format" && <BillFormatTab settings={settings} save={(p) => saveSettings(p)} />}
       {tab === "fields" && <FieldsTab fields={settings.invoice_fields || []} save={(f) => saveSettings({ invoice_fields: f })} showToast={showToast} />}
       {tab === "taxes" && <TaxesTab businessId={businessId} showToast={showToast} />}
       {tab === "adjust" && <AdjustTab presets={settings.adjustment_presets || []} save={(p) => saveSettings({ adjustment_presets: p })} />}
@@ -232,6 +233,75 @@ function TermsTab({ settings, save }) {
       <Field label="Default Customer Notes / Remarks"><textarea aria-label="Default notes" rows={3} className={inputCls} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="e.g. Thanks for your business." /></Field>
       <button onClick={() => save({ default_terms: terms, default_notes: notes })} className="bg-black text-white rounded px-5 py-2 text-sm font-medium">Save</button>
       <p className="text-[11px] text-gray-400">These fill in automatically on each new invoice. Changing them here does not alter invoices you have already made.</p>
+    </div>
+  );
+}
+
+
+/* ---------------- bill format: paper size, numbering, bank details ---------------- */
+const NUMBER_TYPES = [
+  ["sales_invoice", "Tax invoice", "INV-"], ["proforma_invoice", "Proforma invoice", "PF-"], ["receipt", "Receipt", "RCT-"], ["payment", "Payment", "PMT-"],
+  ["purchase_invoice", "Purchase invoice", "PUR-"], ["expense", "Expense", "EXP-"], ["debit_note", "Debit note", "DN-"], ["other_income", "Other income", "OI-"],
+];
+function BillFormatTab({ settings, save }) {
+  const [paper, setPaper] = useState(settings.paper_size || "a4");
+  const [numbering, setNumbering] = useState(() => Object.fromEntries(NUMBER_TYPES.map(([k, , d]) => [k, normalizeNumbering(settings.numbering?.[k], d)])));
+  const [bank, setBank] = useState({ account_name: "", bank_name: "", account_number: "", ifsc: "", branch: "", upi: "", ...(settings.invoice_bank || {}) });
+  const today = new Date().toISOString().slice(0, 10);
+  const setNum = (k, patch) => setNumbering((n) => ({ ...n, [k]: { ...n[k], ...patch } }));
+  const bankField = (key, label, ph) => <Field label={label}><input aria-label={label} className={inputCls} value={bank[key] || ""} placeholder={ph} onChange={(e) => setBank((b) => ({ ...b, [key]: e.target.value }))} /></Field>;
+  const submit = () => save({ paper_size: paper, numbering: Object.fromEntries(NUMBER_TYPES.map(([k, , d]) => [k, normalizeNumbering(numbering[k], d)])), invoice_bank: bank });
+  const P = PAPER_SIZES[paper];
+  return (
+    <div className="space-y-6">
+      <section className="bg-white border border-gray-200 rounded-lg p-5 space-y-3">
+        <h3 className="font-display text-lg">Bill size</h3>
+        <Field label="Paper size for this company's bills">
+          <select aria-label="Bill size" className={inputCls} value={paper} onChange={(e) => setPaper(e.target.value)}>
+            {Object.entries(PAPER_SIZES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+          </select>
+        </Field>
+        <p className="text-[11px] text-gray-500">{P.layout === "receipt" ? "Narrow receipt layout: one item per line, no wide columns." : P.layout === "compact" ? "Compact layout with smaller text so everything fits the small page." : "Full layout with all columns. Text size is scaled for the chosen page."} When you print or Save as PDF, choose “Paper size: {P.page.replace(" auto", "")}” if your printer dialog does not pick it up by itself.</p>
+      </section>
+
+      <section className="bg-white border border-gray-200 rounded-lg p-5 space-y-3">
+        <h3 className="font-display text-lg">Bill numbering</h3>
+        <p className="text-[11px] text-gray-500">Number = Prefix + running number + Suffix. Put <code className="bg-gray-100 px-1 rounded">{"{FY}"}</code> in the prefix or suffix to include the financial year (e.g. <code className="bg-gray-100 px-1 rounded">{"SJ/{FY}/"}</code> gives SJ/{formatVoucherNo({ prefix: "", suffix: "" }, 0, today) && ""}26-27/0001); numbering then starts again from 1 every April. You can always type a different number on a bill.</p>
+        <div className="space-y-3">
+          {NUMBER_TYPES.map(([k, label, d]) => {
+            const c = numbering[k];
+            const preview = formatVoucherNo(c, c.start, today);
+            const problem = k === "sales_invoice" ? gstNumberProblem(preview) : null;
+            return (
+              <div key={k} className="border border-gray-100 rounded p-3">
+                <div className="flex items-center justify-between mb-2"><span className="text-sm font-medium">{label}</span><span aria-label={`${label} preview`} className="text-xs text-gray-500">Example: <b className="text-black">{preview}</b></span></div>
+                <div className="grid grid-cols-4 gap-2">
+                  <input aria-label={`${label} prefix`} className={inputCls} placeholder="Prefix" value={c.prefix} onChange={(e) => setNum(k, { prefix: e.target.value })} />
+                  <input aria-label={`${label} suffix`} className={inputCls} placeholder="Suffix" value={c.suffix} onChange={(e) => setNum(k, { suffix: e.target.value })} />
+                  <input aria-label={`${label} start`} type="number" min="1" className={inputCls} title="Start from" value={c.start} onChange={(e) => setNum(k, { start: e.target.value })} />
+                  <input aria-label={`${label} digits`} type="number" min="1" max="10" className={inputCls} title="Digits" value={c.pad} onChange={(e) => setNum(k, { pad: e.target.value })} />
+                </div>
+                <div className="grid grid-cols-4 gap-2 text-[10px] text-gray-400 mt-0.5"><span>Prefix</span><span>Suffix</span><span>Start from</span><span>Digits</span></div>
+                {problem && <p className="text-[11px] text-amber-700 mt-1">{problem}</p>}
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="bg-white border border-gray-200 rounded-lg p-5 space-y-3">
+        <h3 className="font-display text-lg">Bank details on the bill</h3>
+        <p className="text-[11px] text-gray-500">Printed on every bill so customers know where to pay. You can switch it off on any single bill. Leave everything blank to print nothing.</p>
+        <div className="grid sm:grid-cols-2 gap-3">
+          {bankField("account_name", "Account name", "e.g. Sangam Jewellers")}
+          {bankField("bank_name", "Bank name", "e.g. HDFC Bank")}
+          {bankField("account_number", "Account number", "")}
+          {bankField("ifsc", "IFSC code", "")}
+          {bankField("branch", "Branch", "")}
+          {bankField("upi", "UPI ID (optional)", "name@bank")}
+        </div>
+      </section>
+      <button onClick={submit} className="bg-black text-white rounded px-6 py-2.5 text-sm font-medium">Save bill format</button>
     </div>
   );
 }
