@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Plus, Trash2, X, ChevronDown, Paperclip, ScanLine } from "lucide-react";
 import { todayISO, inr, inputCls, Field, BackHeader } from "../../shared";
 import * as api from "./data";
-import { computeInvoiceTotals, buildSalesInvoiceLines, detectSupplyType, INDIAN_STATES, amountInWords, round2, rateFromTotal, ledgerBalanceOf, computeCalculatedFields } from "./calc";
+import { computeInvoiceTotals, buildSalesInvoiceLines, detectSupplyType, INDIAN_STATES, amountInWords, round2, rateFromTotal, ledgerBalanceOf, computeCalculatedFields, gstSummaryByRate, safeFileName, gstNumberProblem, PAPER_SIZES } from "./calc";
 import { CreatablePicker, Modal, PaymentPartsEditor, PaymentsPanel, newPart, partsTotal, validateParts, buildReceiptForInvoice } from "./invoiceParts";
 
 const fmtDate = (s) => (s ? s.split("-").reverse().join("-") : "");
@@ -104,51 +104,90 @@ function SalespersonPicker({ businessId, value, onChange, showToast }) {
 }
 
 /* ---------- printable invoice ---------- */
-export function invoiceHtml({ business, party, vtype, voucherNo, vdate, dueDate, poNumber, totals, supply, notes, termsText, headerFields = [], lineColumns = [], salespersonName, gstOn }) {
+export function invoiceHtml({ business, party, vtype, voucherNo, vdate, dueDate, poNumber, totals, supply, notes, termsText, headerFields = [], lineColumns = [], salespersonName, gstOn, paper = "a4", fileName, bank = null }) {
   // The customer's outstanding balance is intentionally NOT an input here: it is for on-screen viewing only
   // and must never be printed or shared.
-  const colHead = lineColumns.map((c) => `<th class="r">${esc(c.label)}</th>`).join("");
-  const rows = totals.lines.map((l, i) => `<tr><td>${i + 1}</td><td>${esc(l.description)}</td><td>${esc(l.hsn_sac)}</td><td class="r">${l.qty}</td><td class="r">${money(l.rate)}</td>${lineColumns.map((c) => `<td class="r">${esc(l.colValues?.[c.key] ?? "")}</td>`).join("")}${gstOn ? `<td class="r">${l.gstRate || 0}%</td>` : ""}<td class="r">${money(l.amount)}</td></tr>`).join("");
+  const P = PAPER_SIZES[paper] || PAPER_SIZES.a4;
+  const layout = P.layout;
+  const title = vtype === "proforma_invoice" ? "PROFORMA INVOICE" : "TAX INVOICE";
+  const attrsOf = (l) => (l.attrs || []).map((a) => `${esc(a.label)}: ${esc(a.value)}`).join(" · ");
+  const customOf = (l) => lineColumns.map((c) => (l.colValues?.[c.key] !== undefined && l.colValues?.[c.key] !== "" && l.colValues?.[c.key] !== null ? `${esc(c.label)}: ${esc(l.colValues[c.key])}` : "")).filter(Boolean).join(" · ");
+  const descCell = (l, withCustom) => `${esc(l.description)}${attrsOf(l) ? `<div class="attr">${attrsOf(l)}</div>` : ""}${withCustom && customOf(l) ? `<div class="attr">${customOf(l)}</div>` : ""}`;
+
+  let itemsHtml;
+  if (layout === "receipt") {
+    itemsHtml = `<div class="items">${totals.lines.map((l, i) => `<div class="it"><div>${i + 1}. ${descCell(l, true)}</div><div class="row"><span>${l.qty} × ${money(l.rate)}</span><span>${money(l.amount)}</span></div></div>`).join("")}</div>`;
+  } else if (layout === "compact") {
+    itemsHtml = `<table><thead><tr><th>#</th><th>Item</th><th class="r">Qty</th><th class="r">Rate</th><th class="r">Amount</th></tr></thead><tbody>${totals.lines.map((l, i) => `<tr><td>${i + 1}</td><td>${descCell(l, true)}${l.hsn_sac ? `<div class="attr">HSN: ${esc(l.hsn_sac)}</div>` : ""}</td><td class="r">${l.qty}</td><td class="r">${money(l.rate)}</td><td class="r">${money(l.amount)}</td></tr>`).join("")}</tbody></table>`;
+  } else {
+    const colHead = lineColumns.map((c) => `<th class="r">${esc(c.label)}</th>`).join("");
+    itemsHtml = `<table><thead><tr><th>#</th><th>Item &amp; Description</th><th>HSN/SAC</th><th class="r">Qty</th><th class="r">Rate</th>${colHead}${gstOn ? '<th class="r">GST</th>' : ""}<th class="r">Amount</th></tr></thead><tbody>${totals.lines.map((l, i) => `<tr><td>${i + 1}</td><td>${descCell(l, false)}</td><td>${esc(l.hsn_sac)}</td><td class="r">${l.qty}</td><td class="r">${money(l.rate)}</td>${lineColumns.map((c) => `<td class="r">${esc(l.colValues?.[c.key] ?? "")}</td>`).join("")}${gstOn ? `<td class="r">${l.gstRate || 0}%</td>` : ""}<td class="r">${money(l.amount)}</td></tr>`).join("")}</tbody></table>`;
+  }
+
   const chargeRows = (totals.chargeBreakdown || []).map((c) => `<tr><td>${esc(c.name)}</td><td class="r">+ ${money(c.amount)}</td></tr>`).join("");
   const taxRows = gstOn ? (supply.type === "inter"
     ? `<tr><td>IGST</td><td class="r">${money(totals.igst)}</td></tr>`
     : `<tr><td>CGST</td><td class="r">${money(totals.cgst)}</td></tr><tr><td>SGST</td><td class="r">${money(totals.sgst)}</td></tr>`) : "";
   const otherRows = totals.otherTaxSummary.map((t) => `<tr><td>${esc(t.name)}</td><td class="r">${money(t.amount)}</td></tr>`).join("");
+
+  // GST table: one row per GST rate
+  const gs = gstOn ? gstSummaryByRate(totals) : null;
+  const inter = supply.type === "inter";
+  const gstTable = gs && gs.hasTax ? `<table class="gst"><thead><tr><th>GST rate</th><th class="r">Taxable value</th>${inter ? '<th class="r">IGST</th>' : '<th class="r">CGST</th><th class="r">SGST</th>'}<th class="r">Total tax</th></tr></thead><tbody>${gs.rows.map((r) => `<tr><td>${r.rate}%</td><td class="r">${money(r.taxable)}</td>${inter ? `<td class="r">${money(r.igst)}</td>` : `<td class="r">${money(r.cgst)}</td><td class="r">${money(r.sgst)}</td>`}<td class="r">${money(r.tax)}</td></tr>`).join("")}<tr class="b"><td>Total</td><td class="r">${money(gs.total.taxable)}</td>${inter ? `<td class="r">${money(gs.total.igst)}</td>` : `<td class="r">${money(gs.total.cgst)}</td><td class="r">${money(gs.total.sgst)}</td>`}<td class="r">${money(gs.total.tax)}</td></tr></tbody></table>` : "";
+
+  const bankLines = bank ? [["Account name", bank.account_name], ["Bank", bank.bank_name], ["Account no.", bank.account_number], ["IFSC", bank.ifsc], ["Branch", bank.branch], ["UPI", bank.upi]].filter(([, v]) => v) : [];
+  const bankHtml = bankLines.length ? `<div class="box"><b>Bank details</b><br/>${bankLines.map(([k, v]) => `${esc(k)}: ${esc(v)}`).join("<br/>")}</div>` : "";
+
   const customRows = headerFields.map((f) => `<div><b>${esc(f.label)}:</b> ${esc(f.value)}</div>`).join("");
-  const title = vtype === "proforma_invoice" ? "PROFORMA INVOICE" : "TAX INVOICE";
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)} ${esc(voucherNo)}</title><style>
-  *{box-sizing:border-box} body{font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#111;margin:24px}
-  h1{font-size:20px;margin:0} .top{display:flex;justify-content:space-between;gap:16px;border-bottom:2px solid #111;padding-bottom:10px}
-  .logo{max-height:60px;max-width:160px;margin-bottom:6px} .muted{color:#555} .cols{display:flex;gap:24px;margin:14px 0}.cols>div{flex:1}
-  table{width:100%;border-collapse:collapse} th,td{padding:6px 8px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top} th{background:#f3f3f3;font-size:11px}
-  .r{text-align:right} .tot{width:46%;margin-left:auto;margin-top:10px} .tot td{border:0;padding:3px 8px} .grand td{border-top:2px solid #111;font-weight:bold;font-size:14px}
-  .words{margin:10px 0;font-style:italic} .box{border:1px solid #ddd;padding:8px;margin-top:10px;white-space:pre-wrap}
-  @media print{body{margin:10mm}}</style></head><body>
-  <div class="top"><div>${business.logo ? `<img class="logo" src="${business.logo}"/><br/>` : ""}<h1>${esc(business.name)}</h1>
-    <div class="muted">${esc(addressOf(business))}</div>
-    <div class="muted">${business.gstin ? `GSTIN: ${esc(business.gstin)} ` : ""}${business.pan ? `PAN: ${esc(business.pan)}` : ""}</div>
-    <div class="muted">${[business.mobile, business.email].filter(Boolean).map(esc).join(" · ")}</div></div>
-    <div style="text-align:right"><h1>${title}</h1><div># ${esc(voucherNo)}</div></div></div>
-  <div class="cols"><div><b>Bill To</b><br/>${esc(party?.name)}<br/><span class="muted">${esc(addressOf(party))}</span>${party?.gstin ? `<br/>GSTIN: ${esc(party.gstin)}` : ""}${party?.mobile ? `<br/>${esc(party.mobile)}` : ""}</div>
-    <div><div><b>Date:</b> ${fmtDate(vdate)}</div>${dueDate ? `<div><b>Due date:</b> ${fmtDate(dueDate)}</div>` : ""}${poNumber ? `<div><b>PO No.:</b> ${esc(poNumber)}</div>` : ""}
-    ${gstOn && supply.known ? `<div><b>Place of supply:</b> ${esc(supply.partyState)}</div>` : ""}${salespersonName ? `<div><b>Salesperson:</b> ${esc(salespersonName)}</div>` : ""}${customRows}</div></div>
-  <table><thead><tr><th>#</th><th>Item &amp; Description</th><th>HSN/SAC</th><th class="r">Qty</th><th class="r">Rate</th>${colHead}${gstOn ? '<th class="r">GST</th>' : ""}<th class="r">Amount</th></tr></thead><tbody>${rows}</tbody></table>
+  const meta = `<div><b>Date:</b> ${fmtDate(vdate)}</div>${dueDate ? `<div><b>Due date:</b> ${fmtDate(dueDate)}</div>` : ""}${poNumber ? `<div><b>PO No.:</b> ${esc(poNumber)}</div>` : ""}${gstOn && supply.known ? `<div><b>Place of supply:</b> ${esc(supply.partyState)}</div>` : ""}${salespersonName ? `<div><b>Salesperson:</b> ${esc(salespersonName)}</div>` : ""}${customRows}`;
+  const billTo = `<b>Bill To</b><br/>${esc(party?.name)}<br/><span class="muted">${esc(addressOf(party))}</span>${party?.gstin ? `<br/>GSTIN: ${esc(party.gstin)}` : ""}${party?.mobile ? `<br/>${esc(party.mobile)}` : ""}`;
+  const seller = `${business.logo ? `<img class="logo" src="${business.logo}"/><br/>` : ""}<h1>${esc(business.name)}</h1><div class="muted">${esc(addressOf(business))}</div><div class="muted">${business.gstin ? `GSTIN: ${esc(business.gstin)} ` : ""}${business.pan ? `PAN: ${esc(business.pan)}` : ""}</div><div class="muted">${[business.mobile, business.email].filter(Boolean).map(esc).join(" · ")}</div>`;
+  const head = layout === "receipt"
+    ? `<div class="center">${seller}<div class="ttl">${title}</div><div># ${esc(voucherNo)}</div></div><div class="blk">${meta}</div><div class="blk">${billTo}</div>`
+    : `<div class="top"><div>${seller}</div><div style="text-align:right"><h1>${title}</h1><div># ${esc(voucherNo)}</div></div></div><div class="cols"><div>${billTo}</div><div>${meta}</div></div>`;
+
+  const css = `@page{size:${P.page};margin:${P.margin}}
+  *{box-sizing:border-box} html,body{margin:0;padding:0}
+  body{font-family:Arial,Helvetica,sans-serif;font-size:${P.font}px;color:#111;${P.width ? `width:${P.width};` : ""}}
+  h1{font-size:${Math.round(P.font * 1.6)}px;margin:0} .top{display:flex;justify-content:space-between;gap:12px;border-bottom:2px solid #111;padding-bottom:8px}
+  .logo{max-height:${layout === "full" ? 60 : 36}px;max-width:150px;margin-bottom:4px} .muted{color:#555} .cols{display:flex;gap:18px;margin:10px 0}.cols>div{flex:1}
+  table{width:100%;border-collapse:collapse} th,td{padding:${layout === "full" ? "5px 7px" : "3px 4px"};border-bottom:1px solid #ddd;text-align:left;vertical-align:top} th{background:#f3f3f3;font-size:${Math.round(P.font * 0.92)}px}
+  .r{text-align:right} .attr{color:#555;font-size:${Math.round(P.font * 0.9)}px} .tot{width:${layout === "receipt" ? "100%" : "48%"};margin-left:auto;margin-top:8px} .tot td{border:0;padding:2px 6px}
+  .grand td{border-top:2px solid #111;font-weight:bold;font-size:${Math.round(P.font * 1.15)}px} .gst{margin-top:10px} .gst .b td{font-weight:bold;border-top:1px solid #111}
+  .words{margin:8px 0;font-style:italic} .box{border:1px solid #ddd;padding:6px;margin-top:8px;white-space:pre-wrap} .center{text-align:center} .ttl{font-weight:bold;margin-top:4px}
+  .blk{border-top:1px dashed #999;padding:5px 0;margin-top:5px} .it{border-bottom:1px dotted #aaa;padding:3px 0} .row{display:flex;justify-content:space-between}`;
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${esc(fileName || `${title} ${voucherNo}`)}</title><style>${css}</style></head><body class="paper-${esc(paper)} layout-${layout}">
+  ${head}${itemsHtml}
   <table class="tot"><tr><td>Sub Total</td><td class="r">${money(totals.grossSubtotal)}</td></tr>
     ${totals.discountTotal ? `<tr><td>Discount</td><td class="r">- ${money(totals.discountTotal)}</td></tr>` : ""}
     ${chargeRows}${taxRows}${otherRows}${totals.roundOff ? `<tr><td>Round off</td><td class="r">${money(totals.roundOff)}</td></tr>` : ""}
     <tr class="grand"><td>Total</td><td class="r">${money(totals.total)}</td></tr></table>
+  ${gstTable}
   <div class="words"><b>Total in words:</b> ${esc(amountInWords(totals.total))}</div>
-  ${notes ? `<div class="box"><b>Notes</b>\n${esc(notes)}</div>` : ""}${termsText ? `<div class="box"><b>Terms &amp; Conditions</b>\n${esc(termsText)}</div>` : ""}
+  ${bankHtml}${notes ? `<div class="box"><b>Notes</b><br/>${esc(notes)}</div>` : ""}${termsText ? `<div class="box"><b>Terms &amp; Conditions</b><br/>${esc(termsText)}</div>` : ""}
   </body></html>`;
 }
 
-export function printHtml(html) {
+export function printHtml(html, fileName) {
+  // Browsers suggest the PDF's file name from the page title while printing, so set it for the moment of printing.
+  const original = document.title;
   const iframe = document.createElement("iframe");
   iframe.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0";
   document.body.appendChild(iframe);
   const doc = iframe.contentWindow.document;
   doc.open(); doc.write(html); doc.close();
-  setTimeout(() => { try { iframe.contentWindow.focus(); iframe.contentWindow.print(); } finally { setTimeout(() => iframe.remove(), 3000); } }, 400);
+  if (fileName) doc.title = fileName;
+  let restored = false;
+  const restore = () => { if (restored) return; restored = true; document.title = original; try { iframe.remove(); } catch (e) { /* ignore */ } };
+  setTimeout(() => {
+    try {
+      if (fileName) document.title = fileName;
+      window.addEventListener("afterprint", restore, { once: true });
+      iframe.contentWindow.addEventListener("afterprint", restore, { once: true });
+      setTimeout(restore, 120000);
+      iframe.contentWindow.focus(); iframe.contentWindow.print();
+    } catch (e) { restore(); }
+  }, 400);
 }
 
 function SendDialog({ info, onClose }) {
@@ -169,7 +208,7 @@ function SendDialog({ info, onClose }) {
         {first && <button onClick={share} className={btn}>{navigator.share ? "Share…" : copied ? "Copied to clipboard ✓" : "Copy message to share"}</button>}
         <a href={wa} target="_blank" rel="noreferrer" className={btn + " block"}>WhatsApp {info.party?.mobile ? `(${info.party.mobile})` : ""}</a>
         <a href={mail} className={btn + " block"}>Email {info.party?.email ? `(${info.party.email})` : "(add customer email first)"}</a>
-        <button onClick={() => printHtml(info.html)} className={btn}>Print / Save as PDF</button>
+        <button onClick={() => printHtml(info.html, info.fileName)} className={btn}>Print / Save as PDF</button>
         {!first && <button onClick={share} className={btn}>{navigator.share ? "Share…" : copied ? "Copied ✓" : "Copy message"}</button>}
       </div>
       <p className="text-[11px] text-gray-400 mt-3">The message carries the invoice number, amount and due date. To send the invoice itself, choose Print / Save as PDF and attach it.</p>
@@ -187,9 +226,9 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
   const headerDefs = fieldDefs.filter((d) => d.scope !== "line");
   const lineDefs = fieldDefs.filter((d) => d.scope === "line");
   const keyRef = useRef(0);
-  const blankLine = () => ({ key: ++keyRef.current, item_id: "", description: "", hsn_sac: "", qty: 1, rate: 0, gstRate: 0, otherTaxes: [], custom: {} });
+  const blankLine = () => ({ key: ++keyRef.current, item_id: "", description: "", hsn_sac: "", qty: 1, rate: 0, gstRate: 0, otherTaxes: [], custom: {}, attrs: [] });
   const fromRow = (r) => ({
-    key: ++keyRef.current, item_id: r.item_id || "", description: r.description || "", hsn_sac: r.hsn_sac || "", qty: Number(r.qty) || 0, rate: Number(r.rate) || 0, gstRate: Number(r.gst_rate) || 0, custom: r.extra?.custom || {},
+    key: ++keyRef.current, item_id: r.item_id || "", description: r.description || "", hsn_sac: r.hsn_sac || "", qty: Number(r.qty) || 0, rate: Number(r.rate) || 0, gstRate: Number(r.gst_rate) || 0, custom: r.extra?.custom || {}, attrs: r.extra?.attributes || [],
     otherTaxes: Array.isArray(r.extra?.other_taxes) && r.extra.other_taxes.length ? r.extra.other_taxes.map((t) => ({ name: t.name, rate: t.rate })) : (Number(r.other_tax_rate) > 0 ? [{ name: "Other tax", rate: Number(r.other_tax_rate) }] : []),
   });
   const v0 = initial?.voucher; const m0 = v0?.meta || {};
@@ -225,13 +264,18 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
   const [saveMenu, setSaveMenu] = useState(false);
   const [saving, setSaving] = useState(false);
   const [dialog, setDialog] = useState(null);
+  const [numberTouched, setNumberTouched] = useState(false);
+  const [showBank, setShowBank] = useState(m0.show_bank !== false);
   const [payOn, setPayOn] = useState(false);
   const [payDate, setPayDate] = useState(todayISO());
   const [payParts, setPayParts] = useState(() => [newPart("cash")]);
   const fileRef = useRef(null);
   const scanRef = useRef(null);
 
-  useEffect(() => { if (!isEdit) api.nextVoucherNumber(businessId, vtype, vtype === "proforma_invoice" ? "PF-" : "INV-").then(setVoucherNo); }, [businessId, vtype, isEdit]);
+  useEffect(() => {
+    if (isEdit || numberTouched) return;
+    api.nextVoucherNumber(businessId, vtype, vtype === "proforma_invoice" ? "PF-" : "INV-", settings.numbering?.[vtype], vdate).then(setVoucherNo).catch(() => {});
+  }, [businessId, vtype, isEdit, vdate, numberTouched]);
   useEffect(() => { api.fetchOtherTaxes(businessId).then(setMasterTaxes).catch(() => {}); }, [businessId]);
 
   const party = ledgers.find((l) => l.id === partyId);
@@ -259,6 +303,9 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
     [totals, headerValues, fieldDefs]);
 
   const custBal = party ? ledgerBalanceOf(party, postingLines) : null;
+  const bank = settings.invoice_bank || null;
+  const bankConfigured = !!(bank && (bank.account_number || bank.upi || bank.account_name || bank.bank_name));
+  const gstSum = useMemo(() => gstSummaryByRate(totals), [totals]);
 
   const setLine = (key, patch) => setLineItems((ls) => ls.map((l) => (l.key === key ? { ...l, ...patch } : l)));
   const onRate = (key, raw) => setLine(key, { rate: raw === "" ? "" : parseFloat(raw), totalDraft: undefined });
@@ -273,8 +320,9 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
     if (!qty) return { ...l, totalDraft: raw, qty: 1, rate: total };
     return { ...l, totalDraft: raw, rate: rateFromTotal(total, qty) };
   }));
-  const lineFromItem = (it) => ({ item_id: it.id, description: it.name, hsn_sac: it.hsn_sac || "", rate: Number(it.sale_rate) || 0, gstRate: Number(it.gst_rate) || 0, otherTaxes: Array.isArray(it.other_taxes) ? it.other_taxes : [], totalDraft: undefined });
-  const pickItem = (key, itemId) => { const it = items.find((x) => x.id === itemId); setLine(key, it ? lineFromItem(it) : { item_id: "", description: "" }); };
+  const lineFromItem = (it) => ({ item_id: it.id, description: it.name, hsn_sac: it.hsn_sac || "", rate: Number(it.sale_rate) || 0, gstRate: Number(it.gst_rate) || 0, otherTaxes: Array.isArray(it.other_taxes) ? it.other_taxes : [], totalDraft: undefined,
+    attrs: (Array.isArray(it.attributes) ? it.attributes : []).filter((a) => a.show && String(a.value ?? "") !== "").map((a) => ({ label: a.label, value: a.value })) });
+  const pickItem = (key, itemId) => { const it = items.find((x) => x.id === itemId); setLine(key, it ? lineFromItem(it) : { item_id: "", description: "", attrs: [] }); };
   const addBlank = () => setLineItems((ls) => [...ls, blankLine()]);
   const addItemLine = (it, qty = 1) => setLineItems((ls) => {
     const existing = ls.find((l) => l.item_id === it.id);
@@ -367,7 +415,7 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
       let spName = "";
       if (salespersonId) { try { spName = (await api.fetchSalespersons(businessId)).find((s) => s.id === salespersonId)?.name || ""; } catch (e) { /* ignore */ } }
       const meta = { ...(v0?.meta || {}), status: mode, send_later: after === "later", discount: { type: discountType, value: Number(discountValue) || 0 }, adjustments, extra_taxes: extraTaxes,
-        terms: { type: terms, days: termDays }, due_date: dueDate, terms_text: termsText, salesperson_id: salespersonId || null, salesperson_name: spName, place_of_supply: supply.known ? supply.partyState : null,
+        terms: { type: terms, days: termDays }, due_date: dueDate, terms_text: termsText, salesperson_id: salespersonId || null, salesperson_name: spName, place_of_supply: supply.known ? supply.partyState : null, show_bank: showBank,
         custom_header: headerDefs.map((d) => ({ key: d.key, label: d.label, type: d.type, print: d.showOnPrint !== false, value: d.type === "calculated" ? headerCalc[d.key] : headerValues[d.key] ?? "" })) };
       delete meta.converted_to; delete meta.converted_at;
       if (convertFrom) meta.converted_from = convertFrom.id;
@@ -375,14 +423,14 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
         po_number: poNumber, narration, supply_type: supply.type, subtotal: t.subtotal, cgst: t.cgst, sgst: t.sgst, igst: t.igst, other_tax: t.otherTax, round_off: t.roundOff, total: t.total, meta };
       const apiItems = t.lines.map((l, i) => ({ line_no: i + 1, item_id: l.item_id || null, description: l.description, hsn_sac: l.hsn_sac, qty: l.qty, rate: l.rate, amount: l.amount,
         gst_rate: gstOn ? l.gstRate : 0, other_tax_rate: (l.otherTaxes || []).reduce((s, x) => s + (Number(x.rate) || 0), 0), cgst_amt: l.cgstAmt, sgst_amt: l.sgstAmt, igst_amt: l.igstAmt, other_tax_amt: l.otherTaxAmt,
-        extra: { discount: l.discountAmt, other_taxes: l.otherTaxBreakdown || [], custom: l.custom || {}, calculated: lineCalcFor(l) } }));
+        extra: { discount: l.discountAmt, other_taxes: l.otherTaxBreakdown || [], custom: l.custom || {}, calculated: lineCalcFor(l), attributes: l.attrs || [] } }));
       // A proforma is NEVER posted to the books; only a final sales invoice posts ledger entries.
       const postLines = mode === "final" && vtype === "sales_invoice" ? buildSalesInvoiceLines({ partyLedgerId: partyId, salesLedgerId: sys.sales, gstLedgers: sys, invoiceTotals: t }) : [];
       const id = convertFrom && mode === "final" ? await api.convertProforma(convertFrom.id, voucher, apiItems, postLines) : await api.saveVoucher(voucher, apiItems, postLines);
       for (const f of pendingFiles) { try { await api.uploadAttachment(businessId, id, f); } catch (e) { showToast(`Invoice saved, but ${f.name} could not be uploaded: ${e.message}`); } }
       if (recordPayment) {
         try {
-          const rno = await api.nextVoucherNumber(businessId, "receipt", "RCT-");
+          const rno = await api.nextVoucherNumber(businessId, "receipt", "RCT-", settings.numbering?.receipt, payDate);
           const { receiptVoucher, lines } = buildReceiptForInvoice({ invoice: { id, party_ledger_id: partyId, voucher_no: voucherNo.trim() }, businessId, date: payDate, parts: payParts, cashLedgerId, voucherNo: rno });
           await api.recordInvoicePayment(id, receiptVoucher, lines);
         } catch (e) { showToast(`Invoice saved, but the payment could not be recorded: ${e.message} You can record it from the invoice.`); }
@@ -393,11 +441,12 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
       const headerFields = meta.custom_header.filter((f) => f.print && f.value !== "" && f.value !== null && f.value !== undefined).map((f) => ({ label: f.label, value: f.value }));
       const lineColumns = lineDefs.filter((d) => d.showOnPrint !== false).map((d) => ({ key: d.key, label: d.label }));
       // NOTE: the customer's outstanding balance is deliberately NOT passed here: it is for on-screen viewing only.
-      const html = invoiceHtml({ business, party, vtype, voucherNo: voucherNo.trim(), vdate, dueDate, poNumber, totals: { ...t, lines: printLines }, supply, notes: narration, termsText, headerFields, lineColumns, salespersonName: spName, gstOn });
+      const fileName = safeFileName(voucherNo.trim(), party?.name);
+      const html = invoiceHtml({ business, party, vtype, voucherNo: voucherNo.trim(), vdate, dueDate, poNumber, totals: { ...t, lines: printLines }, supply, notes: narration, termsText, headerFields, lineColumns, salespersonName: spName, gstOn, paper: settings.paper_size || "a4", fileName, bank: showBank && bankConfigured ? settings.invoice_bank : null });
       const text = `${title} ${voucherNo.trim()} dated ${fmtDate(vdate)} from ${business.name}: ${inr(t.total)}${termDays ? `, due by ${fmtDate(dueDate)}` : ", due on receipt"}. Thank you!`;
       if (mode === "draft") { showToast("Saved as draft"); onSaved(); }
-      else if (after === "print") { printHtml(html); showToast(`${title} saved`); onSaved(); }
-      else if (after === "send" || after === "share") { setDialog({ mode: after, party, html, text, subject: `${title} ${voucherNo.trim()} — ${inr(t.total)}` }); }
+      else if (after === "print") { printHtml(html, fileName); showToast(`${title} saved`); onSaved(); }
+      else if (after === "send" || after === "share") { setDialog({ mode: after, party, html, fileName, text, subject: `${title} ${voucherNo.trim()} — ${inr(t.total)}` }); }
       else if (after === "later") { showToast(`${title} saved — marked to send later`); onSaved(); }
       else { showToast(`${title} saved`); onSaved(); }
     } catch (e) { showToast(e.message); }
@@ -432,8 +481,12 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
           </div>
         </div>
         <div className="grid sm:grid-cols-4 gap-3">
-          <Field label="Invoice No."><input className={inputCls} value={voucherNo} onChange={(e) => setVoucherNo(e.target.value)} /></Field>
-          <Field label="Invoice date"><input type="date" className={inputCls} value={vdate} onChange={(e) => setVdate(e.target.value)} /></Field>
+          <Field label="Invoice No.">
+            <input aria-label="Invoice number" className={inputCls} value={voucherNo} onChange={(e) => { setVoucherNo(e.target.value); setNumberTouched(true); }} />
+            {!isEdit && numberTouched && <button type="button" onClick={() => setNumberTouched(false)} className="text-[11px] text-blue-700 mt-1">Use automatic number</button>}
+            {vtype === "sales_invoice" && gstNumberProblem(voucherNo) && <p className="text-[11px] text-amber-700 mt-1">{gstNumberProblem(voucherNo)}</p>}
+          </Field>
+          <Field label="Invoice date"><input type="date" aria-label="Invoice date" className={inputCls} value={vdate} onChange={(e) => setVdate(e.target.value)} /></Field>
           <Field label="Terms">
             <div className="flex gap-2">
               <select aria-label="Terms" className={inputCls} value={terms} onChange={(e) => setTerms(e.target.value)}>
@@ -496,6 +549,7 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
                       <td className="pl-3 pt-3"><input type="checkbox" aria-label={`Select row ${i + 1}`} checked={selected.includes(l.key)} onChange={() => toggleSel(l.key)} /></td>
                       <td className="py-1.5 pr-2">
                         <CreatablePicker options={items.map((it) => ({ id: it.id, label: it.name, sublabel: [it.group_name, it.item_code && `#${it.item_code}`].filter(Boolean).join(" · ") }))} value={l.item_id} onChange={(id) => pickItem(l.key, id)} placeholder="Type or click to select an item" />
+                        {(l.attrs || []).length > 0 && <div aria-label={`Product details ${i + 1}`} className="text-[11px] text-gray-600 mt-0.5">{l.attrs.map((a) => `${a.label}: ${a.value}`).join(" · ")}</div>}
                         {(l.otherTaxBreakdown || []).length > 0 && <div className="text-[10px] text-gray-400 mt-0.5">+ {l.otherTaxBreakdown.map((t) => `${t.name} ${money(t.amount)}`).join(", ")}</div>}
                       </td>
                       <td className="py-1.5 pr-2"><input aria-label={`HSN ${i + 1}`} className={inputCls} value={l.hsn_sac} onChange={(e) => setLine(l.key, { hsn_sac: e.target.value })} /></td>
@@ -547,7 +601,7 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
                 ))}
               </div>
             </div>
-            {finalExisting && <PaymentsPanel invoice={v0} vouchers={vouchers} allocations={allocations} ledgers={ledgers} businessId={businessId} reload={reload} showToast={showToast} />}
+            {finalExisting && <PaymentsPanel invoice={v0} vouchers={vouchers} allocations={allocations} ledgers={ledgers} businessId={businessId} reload={reload} showToast={showToast} numbering={settings.numbering?.receipt} />}
             {canPayOnSave && (
               <div className="border border-gray-200 rounded-lg p-4">
                 <label className="flex items-center gap-2 text-sm font-medium"><input type="checkbox" checked={payOn} onChange={(e) => setPayOn(e.target.checked)} /> Payment received now</label>
@@ -613,11 +667,21 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
             <div className="flex justify-between text-gray-400"><span>Round off</span><span className="tabnum">{money(totals.roundOff)}</span></div>
             <div className="flex justify-between font-semibold text-base border-t border-gray-300 pt-2"><span>Total (₹)</span><span className="tabnum" aria-label="Invoice total">{money(totals.total)}</span></div>
             <p className="text-[11px] text-gray-400">{amountInWords(totals.total)}</p>
+            {gstOn && gstSum.hasTax && (
+              <table aria-label="GST by rate" className="w-full text-xs mt-2 border-t border-gray-200">
+                <thead><tr className="text-gray-500"><th className="text-left py-1 font-medium">GST rate</th><th className="text-right font-medium">Taxable</th>{supply.type === "inter" ? <th className="text-right font-medium">IGST</th> : <><th className="text-right font-medium">CGST</th><th className="text-right font-medium">SGST</th></>}<th className="text-right font-medium">Tax</th></tr></thead>
+                <tbody>
+                  {gstSum.rows.map((r) => <tr key={r.rate}><td className="py-0.5">{r.rate}%</td><td className="text-right tabnum">{money(r.taxable)}</td>{supply.type === "inter" ? <td className="text-right tabnum">{money(r.igst)}</td> : <><td className="text-right tabnum">{money(r.cgst)}</td><td className="text-right tabnum">{money(r.sgst)}</td></>}<td className="text-right tabnum">{money(r.tax)}</td></tr>)}
+                  <tr className="font-semibold border-t border-gray-300"><td className="py-0.5">Total</td><td className="text-right tabnum">{money(gstSum.total.taxable)}</td>{supply.type === "inter" ? <td className="text-right tabnum">{money(gstSum.total.igst)}</td> : <><td className="text-right tabnum">{money(gstSum.total.cgst)}</td><td className="text-right tabnum">{money(gstSum.total.sgst)}</td></>}<td className="text-right tabnum">{money(gstSum.total.tax)}</td></tr>
+                </tbody>
+              </table>
+            )}
+            {bankConfigured && <label className="flex items-center gap-2 text-xs text-gray-600 pt-1"><input type="checkbox" aria-label="Print bank details" checked={showBank} onChange={(e) => setShowBank(e.target.checked)} /> Print bank details on this bill</label>}
           </div>
         </div>
       </div>
 
-      <div className="fixed bottom-14 md:bottom-0 left-0 right-0 md:left-56 z-30 bg-white border-t border-gray-200 px-4 py-3 flex items-center gap-2">
+      <div className="fixed bottom-0 left-0 right-0 md:left-56 z-30 bg-white border-t border-gray-200 px-4 py-3 flex items-center gap-2">
         {!locked && !convertFrom && <button disabled={saving} onClick={() => save("draft", null)} className="border border-gray-300 rounded px-4 py-2 text-sm font-medium hover:border-black disabled:opacity-50">Save as Draft</button>}
         {!locked && (
           <div className="relative flex">
