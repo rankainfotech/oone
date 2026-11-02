@@ -1,5 +1,5 @@
 import { supabase } from "../../supabaseClient";
-import { toDbLines } from "./calc";
+import { toDbLines, nextVoucherNo, normalizeNumbering, friendlyDbError } from "./calc";
 
 // Supabase/Postgres rejects an explicit `id: null` on insert (violates the
 // not-null id column even though a default exists) and rejects empty strings
@@ -111,7 +111,7 @@ export async function saveVoucher(voucher, items, lines, allocs = []) {
   const { data, error } = await supabase.rpc("acc_save_voucher", {
     p_voucher: voucher, p_items: items, p_lines: toDbLines(lines), p_allocs: allocs,
   });
-  if (error) throw error;
+  if (error) throw new Error(friendlyDbError(error.message, voucher.voucher_no));
   return data;
 }
 export async function deleteVoucher(id) {
@@ -119,15 +119,17 @@ export async function deleteVoucher(id) {
   if (error) throw error;
 }
 
-export async function nextVoucherNumber(businessId, vtype, prefix = "") {
-  const { data, error } = await supabase.from("acc_vouchers").select("voucher_no").eq("business_id", businessId).eq("vtype", vtype).order("created_at", { ascending: false }).limit(1);
+/**
+ * Next voucher number. `cfg` is the business's numbering setup for this document type
+ * ({prefix, suffix, start, pad}); without one, `defaultPrefix` + 4 digits is used.
+ * Looks at every existing number in the same format (and financial year when {FY} is used),
+ * so a number typed by hand never throws the automatic sequence off.
+ */
+export async function nextVoucherNumber(businessId, vtype, defaultPrefix = "", cfg = null, dateISO = new Date().toISOString().slice(0, 10)) {
+  const c = normalizeNumbering(cfg || { prefix: defaultPrefix }, defaultPrefix);
+  const { data, error } = await supabase.from("acc_vouchers").select("voucher_no").eq("business_id", businessId).eq("vtype", vtype).limit(20000);
   if (error) throw error;
-  if (!data || data.length === 0) return `${prefix}0001`;
-  const last = data[0].voucher_no;
-  const m = last.match(/(\d+)$/);
-  if (!m) return `${prefix}0001`;
-  const nextNum = String(Number(m[1]) + 1).padStart(m[1].length, "0");
-  return last.slice(0, last.length - m[1].length) + nextNum;
+  return nextVoucherNo((data || []).map((r) => r.voucher_no), c, dateISO);
 }
 
 // ---------------- Timesheets ----------------
@@ -237,14 +239,14 @@ export async function deleteOtherTax(id) {
 // ---------------- Payments against an invoice (can be split across Cash and Bank) ----------------
 export async function recordInvoicePayment(invoiceId, receiptVoucher, lines) {
   const { data, error } = await supabase.rpc("acc_record_invoice_payment", { p_invoice: invoiceId, p_receipt: receiptVoucher, p_lines: toDbLines(lines) });
-  if (error) throw error;
+  if (error) throw new Error(friendlyDbError(error.message, receiptVoucher.voucher_no));
   return data;
 }
 
 // ---------------- Proforma -> Tax invoice (the database allows this only once) ----------------
 export async function convertProforma(proformaId, voucher, items, lines) {
   const { data, error } = await supabase.rpc("acc_convert_proforma", { p_proforma: proformaId, p_voucher: voucher, p_items: items, p_lines: toDbLines(lines) });
-  if (error) throw error;
+  if (error) throw new Error(friendlyDbError(error.message, voucher.voucher_no));
   return data;
 }
 
