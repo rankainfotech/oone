@@ -152,7 +152,7 @@ export function PaymentPartsEditor({ parts, setParts, ledgers, businessId, reloa
 }
 
 /* ---------- payments received against a saved invoice ---------- */
-export function PaymentsPanel({ invoice, vouchers, allocations, ledgers, businessId, reload, showToast }) {
+export function PaymentsPanel({ invoice, vouchers, allocations, ledgers, businessId, reload, showToast, numbering }) {
   const cashLedgerId = ledgers.find((l) => l.system_key === "cash")?.id;
   const nameOf = (id) => ledgers.find((l) => l.id === id)?.name || "Bank";
   const mine = allocations.filter((a) => a.invoice_voucher_id === invoice.id)
@@ -171,7 +171,7 @@ export function PaymentsPanel({ invoice, vouchers, allocations, ledgers, busines
     if (problem) { showToast(problem); return; }
     setSaving(true);
     try {
-      const voucherNo = await api.nextVoucherNumber(businessId, "receipt", "RCT-");
+      const voucherNo = await api.nextVoucherNumber(businessId, "receipt", "RCT-", numbering, date);
       const { receiptVoucher, lines } = buildReceiptForInvoice({ invoice, businessId, date, parts, cashLedgerId, voucherNo });
       await api.recordInvoicePayment(invoice.id, receiptVoucher, lines);
       await reload(); setOpen(false); showToast("Payment recorded");
