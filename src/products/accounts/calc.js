@@ -465,3 +465,114 @@ export function computeCalculatedFields(defs, vars) {
   }
   return out;
 }
+
+
+// ---------------- financial year (Indian: 1 April - 31 March) ----------------
+export function fyStartYear(dateISO) { const [y, m] = String(dateISO).split("-").map(Number); return m >= 4 ? y : y - 1; }
+/** "26-27" for any date from 1 Apr 2026 to 31 Mar 2027. */
+export function financialYearLabel(dateISO) { const y = fyStartYear(dateISO); return `${String(y).slice(-2)}-${String(y + 1).slice(-2)}`; }
+export function fyRange(dateISO) { const y = fyStartYear(dateISO); return { from: `${y}-04-01`, to: `${y + 1}-03-31` }; }
+
+// ---------------- customised bill numbering ----------------
+// number = prefix + zero-padded sequence + suffix. The token {FY} in the prefix or suffix becomes the
+// financial year of the invoice date (e.g. "SJ/{FY}/" -> "SJ/26-27/"), so numbering restarts every April.
+const escRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+export const resolveAffix = (text, dateISO) => String(text || "").replace(/\{FY\}/gi, financialYearLabel(dateISO));
+export const defaultNumbering = (prefix = "") => ({ prefix, suffix: "", start: 1, pad: 4 });
+export function normalizeNumbering(cfg, defaultPrefix = "") {
+  const d = defaultNumbering(defaultPrefix);
+  const c = { ...d, ...(cfg || {}) };
+  c.start = Math.max(1, Math.floor(Number(c.start)) || 1);
+  c.pad = Math.min(10, Math.max(1, Math.floor(Number(c.pad)) || 1));
+  c.prefix = String(c.prefix ?? ""); c.suffix = String(c.suffix ?? "");
+  return c;
+}
+export function formatVoucherNo(cfg, seq, dateISO) {
+  const c = normalizeNumbering(cfg);
+  return resolveAffix(c.prefix, dateISO) + String(seq).padStart(c.pad, "0") + resolveAffix(c.suffix, dateISO);
+}
+/** The sequence number inside a voucher number, or null if it does not follow this format (manual numbers). */
+export function parseVoucherSeq(cfg, voucherNo, dateISO) {
+  const c = normalizeNumbering(cfg);
+  const re = new RegExp("^" + escRe(resolveAffix(c.prefix, dateISO)) + "(\\d+)" + escRe(resolveAffix(c.suffix, dateISO)) + "$");
+  const m = String(voucherNo || "").match(re);
+  return m ? parseInt(m[1], 10) : null;
+}
+/** Highest existing number in THIS format (and financial year) + 1. Manually typed numbers in other formats are ignored. */
+export function nextVoucherNo(existingNos, cfg, dateISO) {
+  const c = normalizeNumbering(cfg);
+  let max = c.start - 1;
+  for (const no of existingNos || []) { const q = parseVoucherSeq(c, no, dateISO); if (q !== null && q > max) max = q; }
+  return formatVoucherNo(c, max + 1, dateISO);
+}
+/** GST rule: an invoice number may be at most 16 characters, using only letters, digits, "/" and "-". */
+export function gstNumberProblem(no) {
+  const t = String(no || "");
+  if (t.length > 16) return `GST rules allow at most 16 characters in an invoice number (this has ${t.length}).`;
+  if (/[^A-Za-z0-9/-]/.test(t)) return "GST rules allow only letters, digits, / and - in an invoice number.";
+  return null;
+}
+/** Turns raw database errors into something a shop owner can act on. */
+export function friendlyDbError(message, voucherNo) {
+  const m = String(message || "");
+  if (/acc_vouchers_no_uq|duplicate key value/i.test(m) && /voucher/i.test(m)) return `The number ${voucherNo || ""} is already used. Type a different number, or choose "Use automatic number".`.replace("  ", " ");
+  return m;
+}
+
+// ---------------- file names ----------------
+/** A safe file name from parts, e.g. ("SJ/26-27/0001", "Ravi Traders") -> "SJ-26-27-0001 - Ravi Traders". */
+export function safeFileName(...parts) {
+  return parts.map((p) => String(p ?? "").replace(/[\\/:*?"<>|\u0000-\u001f]+/g, "-").replace(/\s+/g, " ").trim()).filter(Boolean).join(" - ").replace(/-{2,}/g, "-").slice(0, 120);
+}
+
+// ---------------- bill (paper) sizes ----------------
+export const PAPER_SIZES = {
+  a4: { label: "A4 (210 × 297 mm)", page: "A4", margin: "12mm", font: 12, layout: "full" },
+  a4l: { label: "A4 Landscape", page: "A4 landscape", margin: "10mm", font: 12, layout: "full" },
+  a5: { label: "A5 (148 × 210 mm)", page: "A5", margin: "8mm", font: 10, layout: "full" },
+  a5l: { label: "A5 Landscape (210 × 148 mm)", page: "A5 landscape", margin: "8mm", font: 10, layout: "full" },
+  a6: { label: "A6 (105 × 148 mm)", page: "A6", margin: "5mm", font: 8.5, layout: "compact" },
+  letter: { label: "Letter (8.5 × 11 in)", page: "Letter", margin: "12mm", font: 12, layout: "full" },
+  thermal80: { label: "Thermal receipt, 80 mm roll", page: "80mm auto", margin: "3mm", font: 10, layout: "receipt", width: "74mm" },
+  thermal58: { label: "Thermal receipt, 58 mm roll", page: "58mm auto", margin: "2mm", font: 9, layout: "receipt", width: "54mm" },
+};
+
+// ---------------- ledger statement (view a customer / vendor / any ledger) ----------------
+export const VOUCHER_LABELS = { sales_invoice: "Sales Invoice", proforma_invoice: "Proforma", credit_note: "Credit Note", other_income: "Other Income", purchase_invoice: "Purchase", expense: "Expense", debit_note: "Debit Note", receipt: "Receipt", payment: "Payment", journal: "Journal" };
+/** Opening, every posting in [from, to] with a running balance, and closing. Positive = Dr, negative = Cr. */
+export function ledgerStatement(ledger, lines, vouchers, from, to) {
+  const vById = Object.fromEntries(vouchers.map((v) => [v.id, v]));
+  const op = Number(ledger.opening_balance) || 0;
+  let opening = ledger.opening_side === "Cr" ? -op : op;
+  const mine = lines.filter((l) => l.ledger_id === ledger.id && vById[l.voucher_id]).map((l) => ({ ...l, v: vById[l.voucher_id] }));
+  for (const m of mine) if (from && m.v.vdate < from) opening += (Number(m.debit) || 0) - (Number(m.credit) || 0);
+  opening = round2(opening);
+  const inRange = mine.filter((m) => (!from || m.v.vdate >= from) && (!to || m.v.vdate <= to))
+    .sort((a, b) => (a.v.vdate === b.v.vdate ? String(a.v.voucher_no).localeCompare(String(b.v.voucher_no)) : a.v.vdate < b.v.vdate ? -1 : 1));
+  let bal = opening, totalDebit = 0, totalCredit = 0;
+  const rows = inRange.map((m) => {
+    const debit = round2(m.debit), credit = round2(m.credit);
+    bal = round2(bal + debit - credit); totalDebit = round2(totalDebit + debit); totalCredit = round2(totalCredit + credit);
+    return { date: m.v.vdate, vtype: m.v.vtype, label: VOUCHER_LABELS[m.v.vtype] || m.v.vtype, voucherId: m.v.id, voucherNo: m.v.voucher_no, narration: m.v.narration || "", debit, credit, balance: bal };
+  });
+  return { opening, rows, totalDebit, totalCredit, closing: bal };
+}
+
+/**
+ * The GST table printed on every bill: one row per GST rate with the taxable value and the tax split.
+ * Built from the same lines and charges that were used for the totals, so it always agrees with them.
+ */
+export function gstSummaryByRate(totals) {
+  const byRate = {};
+  const add = (rate, taxable, cgst, sgst, igst) => {
+    const k = String(Number(rate) || 0);
+    byRate[k] = byRate[k] || { rate: Number(rate) || 0, taxable: 0, cgst: 0, sgst: 0, igst: 0 };
+    const r = byRate[k];
+    r.taxable = round2(r.taxable + taxable); r.cgst = round2(r.cgst + cgst); r.sgst = round2(r.sgst + sgst); r.igst = round2(r.igst + igst);
+  };
+  (totals.lines || []).forEach((l) => add(l.gstRate, l.taxable || 0, l.cgstAmt || 0, l.sgstAmt || 0, l.igstAmt || 0));
+  (totals.chargeBreakdown || []).forEach((c) => add(c.gstRate, c.amount || 0, c.cgst || 0, c.sgst || 0, c.igst || 0));
+  const rows = Object.values(byRate).sort((a, b) => a.rate - b.rate).map((r) => ({ ...r, tax: round2(r.cgst + r.sgst + r.igst) }));
+  const sum = (k) => round2(rows.reduce((s, r) => s + r[k], 0));
+  return { rows, total: { taxable: sum("taxable"), cgst: sum("cgst"), sgst: sum("sgst"), igst: sum("igst"), tax: sum("tax") }, hasTax: rows.some((r) => r.tax > 0) };
+}
