@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Users, Truck, Package, BookOpen, Receipt, ShoppingCart, FileText,
-  ArrowLeft, LogOut, Plus, Trash2, Pencil, X, Building2, ChevronDown, AlertTriangle, Settings as SettingsIcon,
+  ArrowLeft, LogOut, Plus, Trash2, Pencil, X, Building2, ChevronDown, AlertTriangle, Settings as SettingsIcon, Menu,
 } from "lucide-react";
 import { supabase } from "../../supabaseClient";
 import { LOGO_DATA_URI } from "../../logo";
@@ -10,6 +10,8 @@ import { todayISO, inr, inputCls, Field, BackHeader, PhotoPicker, Lightbox, Sear
 import * as api from "./data";
 import { InvoiceForm, PartyPicker } from "./Invoice";
 import SettingsScreen from "./Settings";
+import LedgerView from "./LedgerView";
+import { ItemForm, emptyItem } from "./ItemForm";
 import {
   computeInvoiceTotals, buildSalesInvoiceLines, buildPurchaseInvoiceLines,
   buildReceiptLines, buildPaymentLines, trialBalance, profitAndLoss, balanceSheet,
@@ -39,6 +41,7 @@ export default function AccountsApp() {
   const [toast, setToast] = useState(null);
   const [lightboxUrl, setLightboxUrl] = useState(null);
   const [bootError, setBootError] = useState("");
+  const [menuOpen, setMenuOpen] = useState(false);
 
   // data caches for the current business
   const [ledgers, setLedgers] = useState([]);
@@ -175,7 +178,8 @@ export default function AccountsApp() {
       {lightboxUrl && <Lightbox url={lightboxUrl} onClose={() => setLightboxUrl(null)} />}
       {toast && <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-black text-white text-sm px-4 py-2 rounded-full shadow-lg">{toast}</div>}
 
-      <div className="hidden md:flex fixed left-0 top-0 bottom-0 z-40 w-56 bg-white border-r border-gray-200 flex-col">
+      {menuOpen && <div data-testid="menu-backdrop" onClick={() => setMenuOpen(false)} className="md:hidden fixed inset-0 z-40 bg-black/40" />}
+      <aside aria-label="Main menu" data-open={menuOpen ? "true" : "false"} className={`fixed left-0 top-0 bottom-0 z-50 w-64 md:w-56 bg-white border-r border-gray-200 flex flex-col transition-transform duration-200 ${menuOpen ? "translate-x-0" : "-translate-x-full"} md:translate-x-0`}>
         <div className="h-20 flex items-center px-5 border-b border-gray-200">
           <img src={LOGO_DATA_URI} className="h-9 object-contain" />
         </div>
@@ -186,7 +190,7 @@ export default function AccountsApp() {
         </div>
         <nav className="flex-1 py-3">
           {navItems.map(({ id, label, icon: Icon }) => (
-            <button key={id} onClick={() => setScreen(id)} className={`w-full flex items-center gap-3 px-5 py-2.5 text-sm transition-colors ${screen === id ? "bg-gray-100 font-medium border-r-2 border-black" : "text-gray-500 hover:bg-gray-50"}`}>
+            <button key={id} onClick={() => { setScreen(id); setMenuOpen(false); }} className={`w-full flex items-center gap-3 px-5 py-2.5 text-sm transition-colors ${screen === id ? "bg-gray-100 font-medium border-r-2 border-black" : "text-gray-500 hover:bg-gray-50"}`}>
               <Icon size={17} className="shrink-0" /><span>{label}</span>
             </button>
           ))}
@@ -194,17 +198,18 @@ export default function AccountsApp() {
         <button onClick={() => supabase.auth.signOut()} className="flex items-center gap-3 px-5 py-4 text-sm text-gray-500 hover:text-black border-t border-gray-200">
           <LogOut size={17} /><span>Log out</span>
         </button>
-      </div>
+      </aside>
 
-      <div className="md:pl-56 pb-20 md:pb-0">
-        <div className="sticky top-0 z-30 bg-white/95 backdrop-blur border-b border-gray-200 h-14 flex items-center px-4">
+      <div className="md:pl-56">
+        <div className="sticky top-0 z-30 bg-white/95 backdrop-blur border-b border-gray-200 h-14 flex items-center gap-3 px-4">
+          <button aria-label="Open menu" aria-expanded={menuOpen} onClick={() => setMenuOpen((o) => !o)} className="md:hidden -ml-1 p-1.5 rounded hover:bg-gray-100"><Menu size={22} /></button>
           <span className="font-display text-lg">{navItems.find((n) => n.id === screen)?.label}</span>
         </div>
         <main className="max-w-6xl mx-auto px-4 pt-5 pb-10">
           {screen === "dashboard" && <Dashboard ledgers={ledgers} lines={lines} vouchers={vouchers} business={business} openScreen={setScreen} />}
-          {screen === "ledgers" && <LedgersScreen ledgers={ledgers} items={items} businessId={businessId} reload={loadBusinessData} showToast={showToast} onOpenLightbox={setLightboxUrl} />}
+          {screen === "ledgers" && <LedgersScreen ledgers={ledgers} items={items} vouchers={vouchers} lines={lines} business={business} businessId={businessId} reload={loadBusinessData} showToast={showToast} onOpenLightbox={setLightboxUrl} />}
           {screen === "sales" && <SalesScreen goSettings={() => setScreen("settings")} businessId={businessId} ledgers={ledgers} items={items} vouchers={vouchers} lines={lines} allocations={allocations} business={business} reload={loadBusinessData} showToast={showToast} onOpenLightbox={setLightboxUrl} />}
-          {screen === "paymentsReceipts" && <PaymentsReceiptsScreen businessId={businessId} ledgers={ledgers} vouchers={vouchers} allocations={allocations} reload={loadBusinessData} showToast={showToast} />}
+          {screen === "paymentsReceipts" && <PaymentsReceiptsScreen businessId={businessId} ledgers={ledgers} vouchers={vouchers} allocations={allocations} business={business} reload={loadBusinessData} showToast={showToast} />}
           {screen === "purchases" && <PurchasesScreen businessId={businessId} ledgers={ledgers} items={items} vouchers={vouchers} business={business} reload={loadBusinessData} showToast={showToast} onOpenLightbox={setLightboxUrl} />}
           {screen === "reports" && <ReportsScreen ledgers={ledgers} lines={lines} vouchers={vouchers} business={business} />}
           {screen === "settings" && <SettingsScreen business={business} businessId={businessId} showToast={showToast} reloadBusinesses={loadBusinesses} />}
@@ -212,13 +217,6 @@ export default function AccountsApp() {
         </main>
       </div>
 
-      <div className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white border-t border-gray-200 flex overflow-x-auto">
-        {navItems.map(({ id, label, icon: Icon }) => (
-          <button key={id} onClick={() => setScreen(id)} className={`flex-1 min-w-[70px] flex flex-col items-center gap-0.5 py-2 text-[9px] ${screen === id ? "text-black font-medium" : "text-gray-400"}`}>
-            <Icon size={18} /><span className="text-center leading-tight">{label}</span>
-          </button>
-        ))}
-      </div>
     </div>
   );
 }
@@ -532,15 +530,13 @@ function emptyLedger(kind) {
     msme: "", other_registrations: "", office_no: "", building_name: "", street_name: "", city: "", state: "", country: "India", pin_code: "",
     bank_details: { bank_name: "", account_number: "", ifsc: "" } };
 }
-function emptyItem() {
-  return { id: null, item_type: "product", name: "", item_code: "", unit: "", hsn_sac: "", affects_inventory: false,
-    gst_rate: 0, other_tax_rate: 0, opening_qty: 0, opening_amount: 0, group_name: "", rfid: "", sale_rate: "", purchase_rate: "" };
-}
 
-function LedgersScreen({ ledgers, items, businessId, reload, showToast, onOpenLightbox }) {
+
+function LedgersScreen({ ledgers, items, vouchers = [], lines = [], business, businessId, reload, showToast, onOpenLightbox }) {
   const [tab, setTab] = useState("customers");
   const [editingLedger, setEditingLedger] = useState(null);
   const [editingItem, setEditingItem] = useState(null);
+  const [viewing, setViewing] = useState(null);
 
   const customers = ledgers.filter((l) => l.kind === "customer");
   const vendors = ledgers.filter((l) => l.kind === "vendor");
@@ -567,8 +563,9 @@ function LedgersScreen({ ledgers, items, businessId, reload, showToast, onOpenLi
     await reload(); showToast("Deleted");
   };
 
+  if (viewing) return <LedgerView ledger={viewing} vouchers={vouchers} lines={lines} business={business} onBack={() => setViewing(null)} />;
   if (editingLedger) return <LedgerForm existing={editingLedger} onCancel={() => setEditingLedger(null)} onSave={saveLedger} />;
-  if (editingItem) return <ItemForm existing={editingItem} onCancel={() => setEditingItem(null)} onSave={saveItemRow} onOpenLightbox={onOpenLightbox} />;
+  if (editingItem) return <ItemForm existing={editingItem} onCancel={() => setEditingItem(null)} onSave={saveItemRow} groups={[...new Set(items.map((i) => i.group_name).filter(Boolean))].sort()} attrNames={[...new Set(items.flatMap((i) => (i.attributes || []).map((a) => a.label)).filter(Boolean))].sort()} />;
 
   const tabs = [["customers", "Customers"], ["vendors", "Vendors"], ["items", "Products & Services"], ["other", "Other Ledgers"]];
 
@@ -579,21 +576,32 @@ function LedgersScreen({ ledgers, items, businessId, reload, showToast, onOpenLi
           <button key={k} onClick={() => setTab(k)} className={`pb-2.5 whitespace-nowrap ${tab === k ? "font-semibold border-b-2 border-black" : "text-gray-400"}`}>{label}</button>
         ))}
       </div>
-      {tab === "customers" && <LedgerList rows={customers} onAdd={() => setEditingLedger(emptyLedger("customer"))} onEdit={setEditingLedger} onDelete={deleteLedger} empty="No customers yet." />}
-      {tab === "vendors" && <LedgerList rows={vendors} onAdd={() => setEditingLedger(emptyLedger("vendor"))} onEdit={setEditingLedger} onDelete={deleteLedger} empty="No vendors yet." />}
-      {tab === "other" && <LedgerList rows={others} onAdd={() => setEditingLedger(emptyLedger("other"))} onEdit={setEditingLedger} onDelete={deleteLedger} empty="No other ledgers yet." showGroup />}
+      {tab === "customers" && <LedgerList rows={customers} onAdd={() => setEditingLedger(emptyLedger("customer"))} onEdit={setEditingLedger} onDelete={deleteLedger} onView={setViewing} empty="No customers yet." />}
+      {tab === "vendors" && <LedgerList rows={vendors} onAdd={() => setEditingLedger(emptyLedger("vendor"))} onEdit={setEditingLedger} onDelete={deleteLedger} onView={setViewing} empty="No vendors yet." />}
+      {tab === "other" && <LedgerList rows={others} onAdd={() => setEditingLedger(emptyLedger("other"))} onEdit={setEditingLedger} onDelete={deleteLedger} onView={setViewing} empty="No other ledgers yet." showGroup />}
       {tab === "items" && (
         <div>
           <div className="flex justify-end mb-3"><button onClick={() => setEditingItem(emptyItem())} className="bg-black text-white rounded px-3.5 py-2 text-sm font-medium flex items-center gap-1.5"><Plus size={15} /> Add</button></div>
           {items.length === 0 ? <p className="text-sm text-gray-400 text-center py-10">No products or services yet.</p> : (
-            <div className="grid sm:grid-cols-2 gap-3">
-              {items.map((it) => (
-                <div key={it.id} className="bg-white rounded-lg border border-gray-200 p-4 flex gap-3">
-                  {it.image ? <img src={it.image} onClick={() => onOpenLightbox(it.image)} className="w-12 h-12 rounded object-cover cursor-zoom-in" /> : <Package size={28} className="text-gray-300" />}
-                  <div className="flex-1 min-w-0">
-                    <div className="flex justify-between"><span className="font-medium text-sm truncate">{it.name}</span><div className="flex gap-2 shrink-0"><button onClick={() => setEditingItem(it)}><Pencil size={13} className="text-gray-400" /></button><button onClick={() => deleteItemRow(it.id)}><Trash2 size={13} className="text-gray-400" /></button></div></div>
-                    <div className="text-xs text-gray-400">{it.item_type} · {it.hsn_sac || "no HSN/SAC"} · GST {it.gst_rate}%</div>
-                    {it.affects_inventory && <div className="text-xs text-gray-400">Stock: {it.opening_qty} {it.unit}</div>}
+            <div className="space-y-6">
+              {Object.entries(items.reduce((acc, it) => { const g = it.group_name || "Ungrouped"; (acc[g] = acc[g] || []).push(it); return acc; }, {}))
+                .sort(([a], [b]) => (a === "Ungrouped") - (b === "Ungrouped") || a.localeCompare(b))
+                .map(([group, groupItems]) => (
+                <div key={group}>
+                  <h3 className="font-display text-base mb-2 flex items-center gap-2">{group} <span className="text-xs font-body text-gray-400">{groupItems.length} item{groupItems.length > 1 ? "s" : ""}</span></h3>
+                  <div className="grid sm:grid-cols-2 gap-3">
+                    {groupItems.map((it) => (
+                      <div key={it.id} className="bg-white rounded-lg border border-gray-200 p-4 flex gap-3">
+                        {it.image ? <img src={it.image} onClick={() => onOpenLightbox(it.image)} className="w-12 h-12 rounded object-cover cursor-zoom-in" /> : <Package size={28} className="text-gray-300" />}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex justify-between"><span className="font-medium text-sm truncate">{it.name}</span><div className="flex gap-2 shrink-0"><button aria-label={`Edit ${it.name}`} onClick={() => setEditingItem(it)}><Pencil size={13} className="text-gray-400" /></button><button aria-label={`Delete ${it.name}`} onClick={() => deleteItemRow(it.id)}><Trash2 size={13} className="text-gray-400" /></button></div></div>
+                          <div className="text-xs text-gray-400">{it.item_code ? `#${it.item_code} · ` : ""}{it.item_type} · {it.hsn_sac || "no HSN/SAC"} · GST {it.gst_rate}%{Array.isArray(it.other_taxes) && it.other_taxes.length ? ` + ${it.other_taxes.map((t) => `${t.name} ${t.rate}%`).join(", ")}` : ""}</div>
+                          {Array.isArray(it.attributes) && it.attributes.length > 0 && <div className="text-xs text-gray-600 mt-0.5">{it.attributes.map((a) => `${a.label}: ${a.value}${a.show ? "" : " (not on bill)"}`).join(" · ")}</div>}
+                          {it.rfid && <div className="text-xs text-gray-400">RFID: {it.rfid}</div>}
+                          {it.affects_inventory && <div className="text-xs text-gray-400">Stock: {it.opening_qty} {it.unit}</div>}
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
               ))}
@@ -605,7 +613,7 @@ function LedgersScreen({ ledgers, items, businessId, reload, showToast, onOpenLi
   );
 }
 
-function LedgerList({ rows, onAdd, onEdit, onDelete, empty, showGroup }) {
+function LedgerList({ rows, onAdd, onEdit, onDelete, onView, empty, showGroup }) {
   return (
     <div>
       <div className="flex justify-end mb-3"><button onClick={onAdd} className="bg-black text-white rounded px-3.5 py-2 text-sm font-medium flex items-center gap-1.5"><Plus size={15} /> Add</button></div>
@@ -617,6 +625,7 @@ function LedgerList({ rows, onAdd, onEdit, onDelete, empty, showGroup }) {
               <div className="text-xs text-gray-400">{l.mobile || "—"} {l.email ? `· ${l.email}` : ""}</div>
               {showGroup && <div className="text-xs text-gray-400">{groupInfo(l.group_key).name}</div>}
               <div className="text-xs text-gray-400">Opening: {inr(l.opening_balance)} {l.opening_side}</div>
+              {onView && <button aria-label={`View ledger of ${l.name}`} onClick={() => onView(l)} className="mt-2 text-xs text-blue-700 font-medium flex items-center gap-1"><BookOpen size={12} /> View ledger</button>}
             </div>
           ))}
         </div>
@@ -688,47 +697,7 @@ function LedgerForm({ existing, onCancel, onSave }) {
   );
 }
 
-function ItemForm({ existing, onCancel, onSave, onOpenLightbox }) {
-  const [it, setIt] = useState(existing);
-  const set = (k, v) => setIt((p) => ({ ...p, [k]: v }));
-  return (
-    <div className="max-w-lg">
-      <BackHeader title={existing.id ? "Edit item" : "New product / service"} onBack={onCancel} />
-      <div className="bg-white border border-gray-200 rounded-lg p-5 space-y-4">
-        <PhotoPicker label="Image" value={it.image} onChange={(v) => set("image", v)} />
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Type"><select className={inputCls} value={it.item_type} onChange={(e) => set("item_type", e.target.value)}><option value="product">Product</option><option value="service">Service</option></select></Field>
-          <Field label="Name *"><input className={inputCls} value={it.name} onChange={(e) => set("name", e.target.value)} /></Field>
-        </div>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Item code (auto if blank)"><input className={inputCls} value={it.item_code} onChange={(e) => set("item_code", e.target.value)} /></Field>
-          <Field label="Unit"><input className={inputCls} value={it.unit} onChange={(e) => set("unit", e.target.value)} placeholder="pcs, kg, hr…" /></Field>
-        </div>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="HSN/SAC"><input className={inputCls} value={it.hsn_sac} onChange={(e) => set("hsn_sac", e.target.value)} /></Field>
-          <Field label="Group"><input className={inputCls} value={it.group_name} onChange={(e) => set("group_name", e.target.value)} placeholder="e.g. Gold Jewellery" /></Field>
-        </div>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="GST %"><input type="number" className={inputCls} value={it.gst_rate} onChange={(e) => set("gst_rate", parseFloat(e.target.value) || 0)} /></Field>
-          <Field label="Other tax %"><input type="number" className={inputCls} value={it.other_tax_rate} onChange={(e) => set("other_tax_rate", parseFloat(e.target.value) || 0)} /></Field>
-        </div>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Sale rate"><input type="number" className={inputCls} value={it.sale_rate} onChange={(e) => set("sale_rate", parseFloat(e.target.value) || "")} /></Field>
-          <Field label="Purchase rate"><input type="number" className={inputCls} value={it.purchase_rate} onChange={(e) => set("purchase_rate", parseFloat(e.target.value) || "")} /></Field>
-        </div>
-        <div className="flex items-center gap-2"><input type="checkbox" id="affinv" checked={it.affects_inventory} onChange={(e) => set("affects_inventory", e.target.checked)} /><label htmlFor="affinv" className="text-sm">Affects inventory</label></div>
-        {it.affects_inventory && (
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Opening quantity"><input type="number" className={inputCls} value={it.opening_qty} onChange={(e) => set("opening_qty", parseFloat(e.target.value) || 0)} /></Field>
-            <Field label="Opening value (₹)"><input type="number" className={inputCls} value={it.opening_amount} onChange={(e) => set("opening_amount", parseFloat(e.target.value) || 0)} /></Field>
-          </div>
-        )}
-        <Field label="RFID tag (optional)"><input className={inputCls} value={it.rfid} onChange={(e) => set("rfid", e.target.value)} /></Field>
-        <button onClick={() => onSave(it)} disabled={!it.name.trim()} className="w-full bg-black disabled:opacity-40 text-white rounded py-2.5 text-sm font-medium">Save</button>
-      </div>
-    </div>
-  );
-}
+
 
 /* ============ Sales: Invoice / Credit Note / Other Income ============ */
 function sysLedgerMap(ledgers) {
@@ -739,7 +708,7 @@ function sysLedgerMap(ledgers) {
 
 
 
-function OtherIncomeForm({ businessId, ledgers, onCancel, onSaved, showToast, reload }) {
+function OtherIncomeForm({ businessId, ledgers, business, onCancel, onSaved, showToast, reload }) {
   const sys = sysLedgerMap(ledgers);
   const parties = ledgers.map((l) => ({ id: l.id, label: l.name, sublabel: l.kind }));
   const [partyId, setPartyId] = useState("");
@@ -749,7 +718,7 @@ function OtherIncomeForm({ businessId, ledgers, onCancel, onSaved, showToast, re
   const [gstRate, setGstRate] = useState(0);
   const [narration, setNarration] = useState("");
   const [supplyType, setSupplyType] = useState("intra");
-  useEffect(() => { api.nextVoucherNumber(businessId, "other_income", "OI-").then(setVoucherNo); }, [businessId]);
+  useEffect(() => { api.nextVoucherNumber(businessId, "other_income", "OI-", business?.settings?.numbering?.other_income, vdate).then(setVoucherNo).catch(() => {}); }, [businessId, vdate]);
   const totals = useMemo(() => computeInvoiceTotals([{ qty: 1, rate: parseFloat(amount) || 0, gstRate }], { supplyType }), [amount, gstRate, supplyType]);
   const save = async () => {
     if (!partyId || !amount) { showToast("Select a ledger and an amount."); return; }
@@ -834,7 +803,7 @@ function SalesScreen({ businessId, ledgers, items, vouchers, lines, allocations,
   const done = async () => { await reload(); setMode("list"); setCfg(null); };
 
   if (mode === "form") return <InvoiceForm key={cfg.initial?.voucher?.id || "new" + cfg.vtype + (cfg.convertFrom?.id || "")} businessId={businessId} ledgers={ledgers} items={items} vtype={cfg.vtype} business={business} initial={cfg.initial} convertFrom={cfg.convertFrom} vouchers={vouchers} allocations={allocations} lines={lines} reload={reload} goSettings={goSettings} onCancel={() => { setMode("list"); setCfg(null); }} onSaved={done} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
-  if (mode === "otherIncome") return <OtherIncomeForm businessId={businessId} ledgers={ledgers} reload={reload} onCancel={() => setMode("list")} onSaved={done} showToast={showToast} />;
+  if (mode === "otherIncome") return <OtherIncomeForm businessId={businessId} ledgers={ledgers} business={business} reload={reload} onCancel={() => setMode("list")} onSaved={done} showToast={showToast} />;
 
   return (
     <div>
@@ -885,14 +854,14 @@ function outstandingInvoices(vouchers, allocations, partyId) {
   }).filter((v) => v.outstanding > 0.5);
 }
 
-function PaymentsReceiptsScreen({ businessId, ledgers, vouchers, allocations, reload, showToast }) {
+function PaymentsReceiptsScreen({ businessId, ledgers, vouchers, allocations, business, reload, showToast }) {
   const [mode, setMode] = useState("list");
   const prVouchers = vouchers.filter((v) => ["receipt", "payment"].includes(v.vtype));
-  if (mode === "new") return <ReceiptPaymentForm businessId={businessId} ledgers={ledgers} vouchers={vouchers} allocations={allocations} reload={reload} onCancel={() => setMode("list")} onSaved={async () => { await reload(); setMode("list"); }} showToast={showToast} />;
+  if (mode === "new") return <ReceiptPaymentForm businessId={businessId} ledgers={ledgers} vouchers={vouchers} allocations={allocations} business={business} reload={reload} onCancel={() => setMode("list")} onSaved={async () => { await reload(); setMode("list"); }} showToast={showToast} />;
   return <VoucherListScreen title="Payments & Receipts" vouchers={prVouchers} ledgers={ledgers} onOpenNew={() => setMode("new")} newLabel="New Entry" />;
 }
 
-function ReceiptPaymentForm({ businessId, ledgers, vouchers, allocations, onCancel, onSaved, showToast, reload }) {
+function ReceiptPaymentForm({ businessId, ledgers, vouchers, allocations, business, onCancel, onSaved, showToast, reload }) {
   const sys = sysLedgerMap(ledgers);
   const [kind, setKind] = useState("receipt");
   const [partyId, setPartyId] = useState("");
@@ -903,7 +872,7 @@ function ReceiptPaymentForm({ businessId, ledgers, vouchers, allocations, onCanc
   const [allocInvoiceId, setAllocInvoiceId] = useState("");
   const [narration, setNarration] = useState("");
   const [voucherNo, setVoucherNo] = useState("");
-  useEffect(() => { api.nextVoucherNumber(businessId, kind, kind === "receipt" ? "RCT-" : "PMT-").then(setVoucherNo); }, [businessId, kind]);
+  useEffect(() => { api.nextVoucherNumber(businessId, kind, kind === "receipt" ? "RCT-" : "PMT-", business?.settings?.numbering?.[kind], vdate).then(setVoucherNo).catch(() => {}); }, [businessId, kind, vdate]);
 
   const parties = ledgers.filter((l) => l.kind === (kind === "receipt" ? "customer" : "vendor")).map((l) => ({ id: l.id, label: l.name, sublabel: l.mobile }));
   const bankLedgers = ledgers.filter((l) => l.group_key === "bank_accounts").map((l) => ({ id: l.id, label: l.name }));
@@ -952,7 +921,7 @@ function ReceiptPaymentForm({ businessId, ledgers, vouchers, allocations, onCanc
 }
 
 /* ============ Purchases: Purchase Invoice / Expense / Debit Note ============ */
-function PurchaseInvoiceForm({ businessId, ledgers, items, vtype, onCancel, onSaved, showToast, onOpenLightbox, reload }) {
+function PurchaseInvoiceForm({ businessId, ledgers, items, vtype, business, onCancel, onSaved, showToast, onOpenLightbox, reload }) {
   const sys = sysLedgerMap(ledgers);
   const vendors = ledgers.filter((l) => l.kind === "vendor").map((l) => ({ id: l.id, label: l.name, sublabel: l.mobile }));
   const parties = ledgers.map((l) => ({ id: l.id, label: l.name, sublabel: l.kind }));
@@ -965,7 +934,7 @@ function PurchaseInvoiceForm({ businessId, ledgers, items, vtype, onCancel, onSa
   const [narration, setNarration] = useState("");
   const [photo, setPhoto] = useState("");
   const isExpense = vtype === "expense";
-  useEffect(() => { api.nextVoucherNumber(businessId, vtype, vtype === "purchase_invoice" ? "PUR-" : isExpense ? "EXP-" : "DN-").then(setVoucherNo); }, [businessId, vtype]);
+  useEffect(() => { api.nextVoucherNumber(businessId, vtype, vtype === "purchase_invoice" ? "PUR-" : isExpense ? "EXP-" : "DN-", business?.settings?.numbering?.[vtype], vdate).then(setVoucherNo).catch(() => {}); }, [businessId, vtype, vdate]);
   const totals = useMemo(() => computeInvoiceTotals([{ qty: 1, rate: parseFloat(amount) || 0, gstRate }], { supplyType }), [amount, gstRate, supplyType]);
   const save = async () => {
     if (!partyId || !amount) { showToast("Select a ledger and an amount."); return; }
@@ -1003,9 +972,9 @@ function PurchaseInvoiceForm({ businessId, ledgers, items, vtype, onCancel, onSa
 function PurchasesScreen({ businessId, ledgers, items, vouchers, business, reload, showToast, onOpenLightbox }) {
   const [mode, setMode] = useState("list");
   const purchaseVouchers = vouchers.filter((v) => ["purchase_invoice", "expense", "debit_note"].includes(v.vtype));
-  if (mode === "purchase") return <PurchaseInvoiceForm businessId={businessId} ledgers={ledgers} items={items} vtype="purchase_invoice" reload={reload} onCancel={() => setMode("list")} onSaved={async () => { await reload(); setMode("list"); }} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
-  if (mode === "expense") return <PurchaseInvoiceForm businessId={businessId} ledgers={ledgers} items={items} vtype="expense" reload={reload} onCancel={() => setMode("list")} onSaved={async () => { await reload(); setMode("list"); }} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
-  if (mode === "debit") return <PurchaseInvoiceForm businessId={businessId} ledgers={ledgers} items={items} vtype="debit_note" reload={reload} onCancel={() => setMode("list")} onSaved={async () => { await reload(); setMode("list"); }} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
+  if (mode === "purchase") return <PurchaseInvoiceForm businessId={businessId} ledgers={ledgers} items={items} vtype="purchase_invoice" business={business} reload={reload} onCancel={() => setMode("list")} onSaved={async () => { await reload(); setMode("list"); }} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
+  if (mode === "expense") return <PurchaseInvoiceForm businessId={businessId} ledgers={ledgers} items={items} vtype="expense" business={business} reload={reload} onCancel={() => setMode("list")} onSaved={async () => { await reload(); setMode("list"); }} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
+  if (mode === "debit") return <PurchaseInvoiceForm businessId={businessId} ledgers={ledgers} items={items} vtype="debit_note" business={business} reload={reload} onCancel={() => setMode("list")} onSaved={async () => { await reload(); setMode("list"); }} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
   return (
     <VoucherListScreen title="Purchases" vouchers={purchaseVouchers} ledgers={ledgers} onOpenNew={() => setMode("purchase")} newLabel="Purchase Invoice"
       extraButtons={<><button onClick={() => setMode("expense")} className="border border-gray-300 rounded px-3 py-2 text-sm">Expense</button><button onClick={() => setMode("debit")} className="border border-gray-300 rounded px-3 py-2 text-sm">Debit Note</button></>} />
