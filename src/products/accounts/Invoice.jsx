@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Plus, Trash2, X, ChevronDown, Paperclip, ScanLine } from "lucide-react";
 import { todayISO, inr, inputCls, Field, BackHeader } from "../../shared";
 import * as api from "./data";
-import { computeInvoiceTotals, buildSalesInvoiceLines, detectSupplyType, INDIAN_STATES, amountInWords, round2, rateFromTotal, ledgerBalanceOf, computeCalculatedFields, gstSummaryByRate, safeFileName, gstNumberProblem, PAPER_SIZES } from "./calc";
+import { computeInvoiceTotals, buildSalesInvoiceLines, detectSupplyType, INDIAN_STATES, amountInWords, round2, rateFromTotal, ledgerBalanceOf, computeCalculatedFields, gstSummaryByRate, safeFileName, gstNumberProblem, PAPER_SIZES, buildPurchaseInvoiceLines, pageMarginMm } from "./calc";
 import { CreatablePicker, Modal, PaymentPartsEditor, PaymentsPanel, newPart, partsTotal, validateParts, buildReceiptForInvoice } from "./invoiceParts";
 
 const fmtDate = (s) => (s ? s.split("-").reverse().join("-") : "");
@@ -104,15 +104,17 @@ function SalespersonPicker({ businessId, value, onChange, showToast }) {
 }
 
 /* ---------- printable invoice ---------- */
-export function invoiceHtml({ business, party, vtype, voucherNo, vdate, dueDate, poNumber, totals, supply, notes, termsText, headerFields = [], lineColumns = [], salespersonName, gstOn, paper = "a4", fileName, bank = null }) {
+export function invoiceHtml({ business, party, vtype, voucherNo, vdate, dueDate, poNumber, totals, supply, notes, termsText, headerFields = [], lineColumns = [], salespersonName, gstOn, paper = "a4", fileName, bank = null, vendorBillNo = "", signature = null, printOptions = {} }) {
   // The customer's outstanding balance is intentionally NOT an input here: it is for on-screen viewing only
   // and must never be printed or shared.
   const P = PAPER_SIZES[paper] || PAPER_SIZES.a4;
   const layout = P.layout;
-  const title = vtype === "proforma_invoice" ? "PROFORMA INVOICE" : "TAX INVOICE";
+  const title = vtype === "proforma_invoice" ? "PROFORMA INVOICE" : vtype === "purchase_invoice" ? "PURCHASE INVOICE" : "TAX INVOICE";
   const attrsOf = (l) => (l.attrs || []).map((a) => `${esc(a.label)}: ${esc(a.value)}`).join(" · ");
   const customOf = (l) => lineColumns.map((c) => (l.colValues?.[c.key] !== undefined && l.colValues?.[c.key] !== "" && l.colValues?.[c.key] !== null ? `${esc(c.label)}: ${esc(l.colValues[c.key])}` : "")).filter(Boolean).join(" · ");
-  const descCell = (l, withCustom) => `${esc(l.description)}${attrsOf(l) ? `<div class="attr">${attrsOf(l)}</div>` : ""}${withCustom && customOf(l) ? `<div class="attr">${customOf(l)}</div>` : ""}`;
+  const showDetails = printOptions.item_details !== false;   // "print additional details under each item" (on unless switched off)
+  const showCode = !!printOptions.item_code;                 // item code is for data entry; printed only if switched on
+  const descCell = (l, withCustom) => `${esc(l.description)}${showCode && l.code ? `<div class="attr">Code: ${esc(l.code)}</div>` : ""}${showDetails && attrsOf(l) ? `<div class="attr">${attrsOf(l)}</div>` : ""}${withCustom && customOf(l) ? `<div class="attr">${customOf(l)}</div>` : ""}`;
 
   let itemsHtml;
   if (layout === "receipt") {
@@ -138,15 +140,17 @@ export function invoiceHtml({ business, party, vtype, voucherNo, vdate, dueDate,
   const bankLines = bank ? [["Account name", bank.account_name], ["Bank", bank.bank_name], ["Account no.", bank.account_number], ["IFSC", bank.ifsc], ["Branch", bank.branch], ["UPI", bank.upi]].filter(([, v]) => v) : [];
   const bankHtml = bankLines.length ? `<div class="box"><b>Bank details</b><br/>${bankLines.map(([k, v]) => `${esc(k)}: ${esc(v)}`).join("<br/>")}</div>` : "";
 
+  const hasSign = signature && (signature.signature_image || signature.stamp_image || signature.designation);
+  const signHtml = hasSign ? `<div class="sign"><div class="forco">For ${esc(signature.company)}</div><div class="sigbox">${signature.stamp_image ? `<img class="stamp" src="${signature.stamp_image}"/>` : ""}${signature.signature_image ? `<img class="sig" src="${signature.signature_image}"/>` : ""}</div><div class="desig">${esc(signature.designation || "")}</div></div>` : "";
   const customRows = headerFields.map((f) => `<div><b>${esc(f.label)}:</b> ${esc(f.value)}</div>`).join("");
-  const meta = `<div><b>Date:</b> ${fmtDate(vdate)}</div>${dueDate ? `<div><b>Due date:</b> ${fmtDate(dueDate)}</div>` : ""}${poNumber ? `<div><b>PO No.:</b> ${esc(poNumber)}</div>` : ""}${gstOn && supply.known ? `<div><b>Place of supply:</b> ${esc(supply.partyState)}</div>` : ""}${salespersonName ? `<div><b>Salesperson:</b> ${esc(salespersonName)}</div>` : ""}${customRows}`;
-  const billTo = `<b>Bill To</b><br/>${esc(party?.name)}<br/><span class="muted">${esc(addressOf(party))}</span>${party?.gstin ? `<br/>GSTIN: ${esc(party.gstin)}` : ""}${party?.mobile ? `<br/>${esc(party.mobile)}` : ""}`;
+  const meta = `${vendorBillNo ? `<div><b>Vendor bill no.:</b> ${esc(vendorBillNo)}</div>` : ""}<div><b>Date:</b> ${fmtDate(vdate)}</div>${dueDate ? `<div><b>Due date:</b> ${fmtDate(dueDate)}</div>` : ""}${poNumber ? `<div><b>PO No.:</b> ${esc(poNumber)}</div>` : ""}${gstOn && supply.known ? `<div><b>Place of supply:</b> ${esc(supply.partyState)}</div>` : ""}${salespersonName ? `<div><b>Salesperson:</b> ${esc(salespersonName)}</div>` : ""}${customRows}`;
+  const billTo = `<b>${vtype === "purchase_invoice" ? "Supplier" : "Bill To"}</b><br/>${esc(party?.name)}<br/><span class="muted">${esc(addressOf(party))}</span>${party?.gstin ? `<br/>GSTIN: ${esc(party.gstin)}` : ""}${party?.mobile ? `<br/>${esc(party.mobile)}` : ""}`;
   const seller = `${business.logo ? `<img class="logo" src="${business.logo}"/><br/>` : ""}<h1>${esc(business.name)}</h1><div class="muted">${esc(addressOf(business))}</div><div class="muted">${business.gstin ? `GSTIN: ${esc(business.gstin)} ` : ""}${business.pan ? `PAN: ${esc(business.pan)}` : ""}</div><div class="muted">${[business.mobile, business.email].filter(Boolean).map(esc).join(" · ")}</div>`;
   const head = layout === "receipt"
     ? `<div class="center">${seller}<div class="ttl">${title}</div><div># ${esc(voucherNo)}</div></div><div class="blk">${meta}</div><div class="blk">${billTo}</div>`
     : `<div class="top"><div>${seller}</div><div style="text-align:right"><h1>${title}</h1><div># ${esc(voucherNo)}</div></div></div><div class="cols"><div>${billTo}</div><div>${meta}</div></div>`;
 
-  const css = `@page{size:${P.page};margin:${P.margin}}
+  const css = `@page{size:${P.page};margin:${pageMarginMm(P)}mm}
   *{box-sizing:border-box} html,body{margin:0;padding:0}
   body{font-family:Arial,Helvetica,sans-serif;font-size:${P.font}px;color:#111;${P.width ? `width:${P.width};` : ""}}
   h1{font-size:${Math.round(P.font * 1.6)}px;margin:0} .top{display:flex;justify-content:space-between;gap:12px;border-bottom:2px solid #111;padding-bottom:8px}
@@ -155,7 +159,11 @@ export function invoiceHtml({ business, party, vtype, voucherNo, vdate, dueDate,
   .r{text-align:right} .attr{color:#555;font-size:${Math.round(P.font * 0.9)}px} .tot{width:${layout === "receipt" ? "100%" : "48%"};margin-left:auto;margin-top:8px} .tot td{border:0;padding:2px 6px}
   .grand td{border-top:2px solid #111;font-weight:bold;font-size:${Math.round(P.font * 1.15)}px} .gst{margin-top:10px} .gst .b td{font-weight:bold;border-top:1px solid #111}
   .words{margin:8px 0;font-style:italic} .box{border:1px solid #ddd;padding:6px;margin-top:8px;white-space:pre-wrap} .center{text-align:center} .ttl{font-weight:bold;margin-top:4px}
-  .blk{border-top:1px dashed #999;padding:5px 0;margin-top:5px} .it{border-bottom:1px dotted #aaa;padding:3px 0} .row{display:flex;justify-content:space-between}`;
+  .blk{border-top:1px dashed #999;padding:5px 0;margin-top:5px} .it{border-bottom:1px dotted #aaa;padding:3px 0} .row{display:flex;justify-content:space-between}
+  .sign{margin-top:12mm;margin-left:auto;width:${layout === "receipt" ? "100%" : "62mm"};text-align:center;page-break-inside:avoid;break-inside:avoid}
+  .sign .forco{font-weight:bold;margin-bottom:2mm} .sigbox{position:relative;height:24mm}
+  .sigbox img{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);max-height:24mm;max-width:${layout === "receipt" ? "34mm" : "58mm"};mix-blend-mode:multiply}
+  .sigbox .stamp{opacity:.85} .sigbox .sig{max-height:16mm;max-width:${layout === "receipt" ? "30mm" : "40mm"}} .sign .desig{font-weight:bold;border-top:1px solid #111;padding-top:2px;margin-top:1mm}`;
   return `<!doctype html><html><head><meta charset="utf-8"><title>${esc(fileName || `${title} ${voucherNo}`)}</title><style>${css}</style></head><body class="paper-${esc(paper)} layout-${layout}">
   ${head}${itemsHtml}
   <table class="tot"><tr><td>Sub Total</td><td class="r">${money(totals.grossSubtotal)}</td></tr>
@@ -165,6 +173,7 @@ export function invoiceHtml({ business, party, vtype, voucherNo, vdate, dueDate,
   ${gstTable}
   <div class="words"><b>Total in words:</b> ${esc(amountInWords(totals.total))}</div>
   ${bankHtml}${notes ? `<div class="box"><b>Notes</b><br/>${esc(notes)}</div>` : ""}${termsText ? `<div class="box"><b>Terms &amp; Conditions</b><br/>${esc(termsText)}</div>` : ""}
+  ${signHtml}
   </body></html>`;
 }
 
@@ -220,15 +229,19 @@ function SendDialog({ info, onClose }) {
 /* ---------- the invoice form ---------- */
 export function InvoiceForm({ businessId, ledgers, items, vtype, business, initial, convertFrom, vouchers = [], allocations = [], lines: postingLines = [], onCancel, onSaved, showToast, reload, onOpenLightbox, goSettings }) {
   const isEdit = !!initial && !convertFrom;
+  const isPurchase = vtype === "purchase_invoice";           // same form, purchase accounting
+  const partyKind = isPurchase ? "vendor" : "customer";
+  const partyWord = isPurchase ? "Vendor" : "Customer";
+  const defaultPrefix = vtype === "proforma_invoice" ? "PF-" : isPurchase ? "PUR-" : "INV-";
   const sys = sysMap(ledgers);
   const settings = business?.settings || {};
   const fieldDefs = Array.isArray(settings.invoice_fields) ? settings.invoice_fields : [];
   const headerDefs = fieldDefs.filter((d) => d.scope !== "line");
   const lineDefs = fieldDefs.filter((d) => d.scope === "line");
   const keyRef = useRef(0);
-  const blankLine = () => ({ key: ++keyRef.current, item_id: "", description: "", hsn_sac: "", qty: 1, rate: 0, gstRate: 0, otherTaxes: [], custom: {}, attrs: [] });
+  const blankLine = () => ({ key: ++keyRef.current, item_id: "", description: "", hsn_sac: "", qty: 1, rate: 0, gstRate: 0, otherTaxes: [], custom: {}, attrs: [], code: "" });
   const fromRow = (r) => ({
-    key: ++keyRef.current, item_id: r.item_id || "", description: r.description || "", hsn_sac: r.hsn_sac || "", qty: Number(r.qty) || 0, rate: Number(r.rate) || 0, gstRate: Number(r.gst_rate) || 0, custom: r.extra?.custom || {}, attrs: r.extra?.attributes || [],
+    key: ++keyRef.current, item_id: r.item_id || "", description: r.description || "", hsn_sac: r.hsn_sac || "", qty: Number(r.qty) || 0, rate: Number(r.rate) || 0, gstRate: Number(r.gst_rate) || 0, custom: r.extra?.custom || {}, attrs: r.extra?.attributes || [], code: r.extra?.item_code || "",
     otherTaxes: Array.isArray(r.extra?.other_taxes) && r.extra.other_taxes.length ? r.extra.other_taxes.map((t) => ({ name: t.name, rate: t.rate })) : (Number(r.other_tax_rate) > 0 ? [{ name: "Other tax", rate: Number(r.other_tax_rate) }] : []),
   });
   const v0 = initial?.voucher; const m0 = v0?.meta || {};
@@ -238,16 +251,16 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
   const [vdate, setVdate] = useState(isEdit ? v0.vdate : todayISO());
   const [voucherNo, setVoucherNo] = useState(isEdit ? v0.voucher_no : "");
   const [poNumber, setPoNumber] = useState(v0?.po_number || "");
-  const [narration, setNarration] = useState(v0 ? v0.narration || "" : settings.default_notes || "");
+  const [narration, setNarration] = useState(v0 ? v0.narration || "" : isPurchase ? "" : settings.default_notes || "");
   const [lineItems, setLineItems] = useState(initial?.items?.length ? initial.items.map(fromRow) : [blankLine()]);
   const [discountType, setDiscountType] = useState(m0.discount?.type || "percent");
   const [discountValue, setDiscountValue] = useState(m0.discount?.value || 0);
-  const [adjustments, setAdjustments] = useState(() => m0.adjustments || (!initial ? (settings.adjustment_presets || []).filter((p) => p.autoApply).map((p) => ({ key: ++keyRef.current, name: p.name, kind: p.kind, mode: p.mode, value: p.value, gstRate: p.gstRate || 0 })) : []));
+  const [adjustments, setAdjustments] = useState(() => m0.adjustments || (!initial && !isPurchase ? (settings.adjustment_presets || []).filter((p) => p.autoApply).map((p) => ({ key: ++keyRef.current, name: p.name, kind: p.kind, mode: p.mode, value: p.value, gstRate: p.gstRate || 0 })) : []));
   const [extraTaxes, setExtraTaxes] = useState((m0.extra_taxes || []).map(normTax));
   const [masterTaxes, setMasterTaxes] = useState([]);
   const [terms, setTerms] = useState(m0.terms?.type || "receipt");
   const [customDays, setCustomDays] = useState(m0.terms?.days || 7);
-  const [termsText, setTermsText] = useState(m0.terms_text ?? settings.default_terms ?? "");
+  const [termsText, setTermsText] = useState(m0.terms_text ?? (isPurchase ? "" : settings.default_terms ?? ""));
   const [salespersonId, setSalespersonId] = useState(m0.salesperson_id || "");
   const [headerValues, setHeaderValues] = useState(() => {
     const saved = {}; (m0.custom_header || []).forEach((f) => { saved[f.key] = f.value; });
@@ -265,6 +278,7 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
   const [saving, setSaving] = useState(false);
   const [dialog, setDialog] = useState(null);
   const [numberTouched, setNumberTouched] = useState(false);
+  const [vendorBillNo, setVendorBillNo] = useState(v0?.reference || "");
   const [showBank, setShowBank] = useState(m0.show_bank !== false);
   const [payOn, setPayOn] = useState(false);
   const [payDate, setPayDate] = useState(todayISO());
@@ -274,7 +288,7 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
 
   useEffect(() => {
     if (isEdit || numberTouched) return;
-    api.nextVoucherNumber(businessId, vtype, vtype === "proforma_invoice" ? "PF-" : "INV-", settings.numbering?.[vtype], vdate).then(setVoucherNo).catch(() => {});
+    api.nextVoucherNumber(businessId, vtype, defaultPrefix, settings.numbering?.[vtype], vdate).then(setVoucherNo).catch(() => {});
   }, [businessId, vtype, isEdit, vdate, numberTouched]);
   useEffect(() => { api.fetchOtherTaxes(businessId).then(setMasterTaxes).catch(() => {}); }, [businessId]);
 
@@ -304,6 +318,9 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
 
   const custBal = party ? ledgerBalanceOf(party, postingLines) : null;
   const bank = settings.invoice_bank || null;
+  const sigCfg = settings.signature;
+  const signature = !isPurchase && sigCfg && sigCfg.show !== false && (sigCfg.signature_image || sigCfg.stamp_image || sigCfg.designation)
+    ? { company: business?.name, designation: sigCfg.designation || "", signature_image: sigCfg.signature_image || "", stamp_image: sigCfg.stamp_image || "" } : null;
   const bankConfigured = !!(bank && (bank.account_number || bank.upi || bank.account_name || bank.bank_name));
   const gstSum = useMemo(() => gstSummaryByRate(totals), [totals]);
 
@@ -320,9 +337,9 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
     if (!qty) return { ...l, totalDraft: raw, qty: 1, rate: total };
     return { ...l, totalDraft: raw, rate: rateFromTotal(total, qty) };
   }));
-  const lineFromItem = (it) => ({ item_id: it.id, description: it.name, hsn_sac: it.hsn_sac || "", rate: Number(it.sale_rate) || 0, gstRate: Number(it.gst_rate) || 0, otherTaxes: Array.isArray(it.other_taxes) ? it.other_taxes : [], totalDraft: undefined,
+  const lineFromItem = (it) => ({ item_id: it.id, description: it.name, hsn_sac: it.hsn_sac || "", rate: Number(isPurchase ? it.purchase_rate : it.sale_rate) || 0, code: it.item_code || "", gstRate: Number(it.gst_rate) || 0, otherTaxes: Array.isArray(it.other_taxes) ? it.other_taxes : [], totalDraft: undefined,
     attrs: (Array.isArray(it.attributes) ? it.attributes : []).filter((a) => a.show && String(a.value ?? "") !== "").map((a) => ({ label: a.label, value: a.value })) });
-  const pickItem = (key, itemId) => { const it = items.find((x) => x.id === itemId); setLine(key, it ? lineFromItem(it) : { item_id: "", description: "", attrs: [] }); };
+  const pickItem = (key, itemId) => { const it = items.find((x) => x.id === itemId); setLine(key, it ? lineFromItem(it) : { item_id: "", description: "", attrs: [], code: "" }); };
   const addBlank = () => setLineItems((ls) => [...ls, blankLine()]);
   const addItemLine = (it, qty = 1) => setLineItems((ls) => {
     const existing = ls.find((l) => l.item_id === it.id);
@@ -360,7 +377,7 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
   };
 
   const taxLabel = (t) => (t.type === "fixed_invoice" ? `₹${t.value} per invoice` : t.type === "fixed_unit" ? `₹${t.value} per unit` : `${t.value}%`);
-  const availableTaxes = masterTaxes.filter((t) => t.active && t.applies_to !== "purchase" && !extraTaxes.some((x) => x.id === t.id));
+  const availableTaxes = masterTaxes.filter((t) => t.active && (isPurchase ? t.applies_to !== "sales" : t.applies_to !== "purchase") && !extraTaxes.some((x) => x.id === t.id));
   const addMasterTax = (id) => { const t = masterTaxes.find((x) => x.id === id); if (t) setExtraTaxes((x) => [...x, normTax({ id: t.id, name: t.name, type: t.calc_type, value: t.value })]); };
   const otherAmount = (name) => totals.otherTaxSummary.find((t) => t.name === name)?.amount || 0;
 
@@ -400,7 +417,7 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
   const save = async (mode, after) => {
     setSaveMenu(false);
     if (locked) { showToast("This proforma has been converted to a tax invoice and can no longer be changed."); return; }
-    if (!partyId) { showToast("Select a customer first."); return; }
+    if (!partyId) { showToast(`Select a ${partyKind} first.`); return; }
     if (!voucherNo.trim()) { showToast("Enter an invoice number."); return; }
     const validLines = lineItems.filter((l) => (l.item_id || (l.description || "").trim()) && Number(l.qty) > 0);
     if (mode === "final" && !validLines.length) { showToast("Add at least one item with a quantity."); return; }
@@ -419,13 +436,15 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
         custom_header: headerDefs.map((d) => ({ key: d.key, label: d.label, type: d.type, print: d.showOnPrint !== false, value: d.type === "calculated" ? headerCalc[d.key] : headerValues[d.key] ?? "" })) };
       delete meta.converted_to; delete meta.converted_at;
       if (convertFrom) meta.converted_from = convertFrom.id;
-      const voucher = { id: isEdit ? v0.id : undefined, business_id: businessId, vtype, voucher_no: voucherNo.trim(), vdate, party_ledger_id: partyId, main_ledger_id: sys.sales,
+      const voucher = { id: isEdit ? v0.id : undefined, business_id: businessId, vtype, voucher_no: voucherNo.trim(), vdate, party_ledger_id: partyId, main_ledger_id: isPurchase ? sys.purchases : sys.sales, reference: isPurchase ? vendorBillNo.trim() || null : null,
         po_number: poNumber, narration, supply_type: supply.type, subtotal: t.subtotal, cgst: t.cgst, sgst: t.sgst, igst: t.igst, other_tax: t.otherTax, round_off: t.roundOff, total: t.total, meta };
       const apiItems = t.lines.map((l, i) => ({ line_no: i + 1, item_id: l.item_id || null, description: l.description, hsn_sac: l.hsn_sac, qty: l.qty, rate: l.rate, amount: l.amount,
         gst_rate: gstOn ? l.gstRate : 0, other_tax_rate: (l.otherTaxes || []).reduce((s, x) => s + (Number(x.rate) || 0), 0), cgst_amt: l.cgstAmt, sgst_amt: l.sgstAmt, igst_amt: l.igstAmt, other_tax_amt: l.otherTaxAmt,
-        extra: { discount: l.discountAmt, other_taxes: l.otherTaxBreakdown || [], custom: l.custom || {}, calculated: lineCalcFor(l), attributes: l.attrs || [] } }));
+        extra: { discount: l.discountAmt, other_taxes: l.otherTaxBreakdown || [], custom: l.custom || {}, calculated: lineCalcFor(l), attributes: l.attrs || [], item_code: l.code || "" } }));
       // A proforma is NEVER posted to the books; only a final sales invoice posts ledger entries.
-      const postLines = mode === "final" && vtype === "sales_invoice" ? buildSalesInvoiceLines({ partyLedgerId: partyId, salesLedgerId: sys.sales, gstLedgers: sys, invoiceTotals: t }) : [];
+      const postLines = mode !== "final" ? []
+        : isPurchase ? buildPurchaseInvoiceLines({ partyLedgerId: partyId, purchaseLedgerId: sys.purchases, gstLedgers: sys, invoiceTotals: t })   // Dr Purchases + GST input, Cr Vendor
+        : vtype === "sales_invoice" ? buildSalesInvoiceLines({ partyLedgerId: partyId, salesLedgerId: sys.sales, gstLedgers: sys, invoiceTotals: t }) : [];
       const id = convertFrom && mode === "final" ? await api.convertProforma(convertFrom.id, voucher, apiItems, postLines) : await api.saveVoucher(voucher, apiItems, postLines);
       for (const f of pendingFiles) { try { await api.uploadAttachment(businessId, id, f); } catch (e) { showToast(`Invoice saved, but ${f.name} could not be uploaded: ${e.message}`); } }
       if (recordPayment) {
@@ -436,13 +455,13 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
         } catch (e) { showToast(`Invoice saved, but the payment could not be recorded: ${e.message} You can record it from the invoice.`); }
       }
 
-      const title = vtype === "proforma_invoice" ? "Proforma invoice" : "Invoice";
+      const title = vtype === "proforma_invoice" ? "Proforma invoice" : isPurchase ? "Purchase invoice" : "Invoice";
       const printLines = t.lines.map((l) => ({ ...l, colValues: { ...(l.custom || {}), ...lineCalcFor(l) } }));
       const headerFields = meta.custom_header.filter((f) => f.print && f.value !== "" && f.value !== null && f.value !== undefined).map((f) => ({ label: f.label, value: f.value }));
       const lineColumns = lineDefs.filter((d) => d.showOnPrint !== false).map((d) => ({ key: d.key, label: d.label }));
       // NOTE: the customer's outstanding balance is deliberately NOT passed here: it is for on-screen viewing only.
       const fileName = safeFileName(voucherNo.trim(), party?.name);
-      const html = invoiceHtml({ business, party, vtype, voucherNo: voucherNo.trim(), vdate, dueDate, poNumber, totals: { ...t, lines: printLines }, supply, notes: narration, termsText, headerFields, lineColumns, salespersonName: spName, gstOn, paper: settings.paper_size || "a4", fileName, bank: showBank && bankConfigured ? settings.invoice_bank : null });
+      const html = invoiceHtml({ business, party, vtype, voucherNo: voucherNo.trim(), vdate, dueDate, poNumber, totals: { ...t, lines: printLines }, supply, notes: narration, termsText, headerFields, lineColumns, salespersonName: spName, gstOn, paper: settings.paper_size || "a4", fileName, bank: !isPurchase && showBank && bankConfigured ? settings.invoice_bank : null, vendorBillNo: vendorBillNo.trim(), signature, printOptions: settings.print_options || {} });
       const text = `${title} ${voucherNo.trim()} dated ${fmtDate(vdate)} from ${business.name}: ${inr(t.total)}${termDays ? `, due by ${fmtDate(dueDate)}` : ", due on receipt"}. Thank you!`;
       if (mode === "draft") { showToast("Saved as draft"); onSaved(); }
       else if (after === "print") { printHtml(html, fileName); showToast(`${title} saved`); onSaved(); }
@@ -454,7 +473,7 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
   };
 
   const th = "py-2 pr-2 text-xs font-medium text-gray-500 text-left";
-  const title = vtype === "proforma_invoice" ? "Proforma Invoice" : "Tax Invoice";
+  const title = vtype === "proforma_invoice" ? "Proforma Invoice" : isPurchase ? "Purchase Invoice" : "Tax Invoice";
   const money = (n) => "₹" + fmt(n);
 
   return (
@@ -465,23 +484,23 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
       <div className="bg-white border border-gray-200 rounded-lg p-5 space-y-5 max-w-5xl">
         <div className="grid sm:grid-cols-2 gap-3">
           <div>
-            <Field label="Customer *"><PartyPicker kind="customer" ledgers={ledgers} value={partyId} onChange={setPartyId} businessId={businessId} reload={reload} showToast={showToast} /></Field>
+            <Field label={`${partyWord} *`}><PartyPicker kind={partyKind} ledgers={ledgers} value={partyId} onChange={setPartyId} businessId={businessId} reload={reload} showToast={showToast} /></Field>
             {party && custBal !== null && (
-              <div aria-label="Customer outstanding" className="mt-1.5 text-xs bg-amber-50 border border-amber-100 rounded px-2 py-1.5">
-                Outstanding: <b className="tabnum">{money(Math.abs(custBal))}</b> {custBal > 0.005 ? "to receive" : custBal < -0.005 ? "advance / credit" : "— nothing due"}
-                <span className="text-gray-500"> · for your view only, never printed or shared{isEdit && finalExisting ? " (includes this invoice)" : ""}</span>
+              <div aria-label={`${partyWord} outstanding`} className="mt-1.5 text-xs bg-amber-50 border border-amber-100 rounded px-2 py-1.5">
+                Outstanding: <b className="tabnum">{money(Math.abs(custBal))}</b> {isPurchase ? (custBal < -0.005 ? "to pay" : custBal > 0.005 ? "advance paid" : "— nothing due") : (custBal > 0.005 ? "to receive" : custBal < -0.005 ? "advance / credit" : "— nothing due")}
+                <span className="text-gray-500"> · for your view only, never printed or shared{isEdit && m0.status !== "draft" ? " (includes this invoice)" : ""}</span>
               </div>
             )}
           </div>
           <div className="text-xs text-gray-500 self-end pb-2">
             {!gstOn ? <span className="text-amber-700">GST is switched off for this business, so no GST is charged. Turn it on under Business Profile.</span>
-              : !partyId ? "Place of supply is detected from the customer's state."
-              : supply.known ? <>Place of supply: <b>{supply.partyState}</b> → <b>{supply.type === "inter" ? "IGST" : "CGST + SGST"}</b></>
-              : <span className="text-amber-700">This customer's state isn't set, so CGST + SGST is applied. Add the state or GSTIN under Ledgers to detect IGST automatically.</span>}
+              : !partyId ? `Place of supply is detected from the ${partyKind}'s state.`
+              : supply.known ? <>{isPurchase ? "Supplier's state" : "Place of supply"}: <b>{supply.partyState}</b> → <b>{supply.type === "inter" ? "IGST" : "CGST + SGST"}</b></>
+              : <span className="text-amber-700">This {partyKind}'s state isn't set, so CGST + SGST is applied. Add the state or GSTIN under Ledgers to detect IGST automatically.</span>}
           </div>
         </div>
         <div className="grid sm:grid-cols-4 gap-3">
-          <Field label="Invoice No.">
+          <Field label={isPurchase ? "Our voucher no." : "Invoice No."}>
             <input aria-label="Invoice number" className={inputCls} value={voucherNo} onChange={(e) => { setVoucherNo(e.target.value); setNumberTouched(true); }} />
             {!isEdit && numberTouched && <button type="button" onClick={() => setNumberTouched(false)} className="text-[11px] text-blue-700 mt-1">Use automatic number</button>}
             {vtype === "sales_invoice" && gstNumberProblem(voucherNo) && <p className="text-[11px] text-amber-700 mt-1">{gstNumberProblem(voucherNo)}</p>}
@@ -499,7 +518,9 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
         </div>
         <div className="grid sm:grid-cols-2 gap-3">
           <Field label="Purchase Order No."><input className={inputCls} value={poNumber} onChange={(e) => setPoNumber(e.target.value)} /></Field>
-          <Field label="Salesperson"><SalespersonPicker businessId={businessId} value={salespersonId} onChange={setSalespersonId} showToast={showToast} /></Field>
+          {isPurchase
+            ? <Field label="Vendor bill no."><input aria-label="Vendor bill number" className={inputCls} value={vendorBillNo} onChange={(e) => setVendorBillNo(e.target.value)} placeholder="The supplier's own invoice number" /></Field>
+            : <Field label="Salesperson"><SalespersonPicker businessId={businessId} value={salespersonId} onChange={setSalespersonId} showToast={showToast} /></Field>}
         </div>
         {headerDefs.length > 0 && (
           <div className="grid sm:grid-cols-3 gap-3">
@@ -548,7 +569,9 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
                     <tr key={l.key} className="border-b border-gray-100 align-top">
                       <td className="pl-3 pt-3"><input type="checkbox" aria-label={`Select row ${i + 1}`} checked={selected.includes(l.key)} onChange={() => toggleSel(l.key)} /></td>
                       <td className="py-1.5 pr-2">
-                        <CreatablePicker options={items.map((it) => ({ id: it.id, label: it.name, sublabel: [it.group_name, it.item_code && `#${it.item_code}`].filter(Boolean).join(" · ") }))} value={l.item_id} onChange={(id) => pickItem(l.key, id)} placeholder="Type or click to select an item" />
+                        <CreatablePicker options={items.map((it) => ({ id: it.id, label: it.name, keywords: [it.item_code, it.group_name, it.hsn_sac, it.rfid].filter(Boolean).join(" "), sublabel: [it.group_name, it.item_code && `#${it.item_code}`, Number(isPurchase ? it.purchase_rate : it.sale_rate) ? `₹${isPurchase ? it.purchase_rate : it.sale_rate}` : ""].filter(Boolean).join(" · ") }))}
+                          value={l.item_id} onChange={(id) => pickItem(l.key, id)} placeholder="Start typing item name or code…" showOnFocus={false} minChars={1} maxResults={8} />
+                        {l.code && <div aria-label={`Item code ${i + 1}`} className="text-[10px] text-gray-400 mt-0.5">Code: {l.code}</div>}
                         {(l.attrs || []).length > 0 && <div aria-label={`Product details ${i + 1}`} className="text-[11px] text-gray-600 mt-0.5">{l.attrs.map((a) => `${a.label}: ${a.value}`).join(" · ")}</div>}
                         {(l.otherTaxBreakdown || []).length > 0 && <div className="text-[10px] text-gray-400 mt-0.5">+ {l.otherTaxBreakdown.map((t) => `${t.name} ${money(t.amount)}`).join(", ")}</div>}
                       </td>
@@ -676,7 +699,7 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
                 </tbody>
               </table>
             )}
-            {bankConfigured && <label className="flex items-center gap-2 text-xs text-gray-600 pt-1"><input type="checkbox" aria-label="Print bank details" checked={showBank} onChange={(e) => setShowBank(e.target.checked)} /> Print bank details on this bill</label>}
+            {bankConfigured && !isPurchase && <label className="flex items-center gap-2 text-xs text-gray-600 pt-1"><input type="checkbox" aria-label="Print bank details" checked={showBank} onChange={(e) => setShowBank(e.target.checked)} /> Print bank details on this bill</label>}
           </div>
         </div>
       </div>
@@ -685,13 +708,13 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
         {!locked && !convertFrom && <button disabled={saving} onClick={() => save("draft", null)} className="border border-gray-300 rounded px-4 py-2 text-sm font-medium hover:border-black disabled:opacity-50">Save as Draft</button>}
         {!locked && (
           <div className="relative flex">
-            <button disabled={saving} onClick={() => save("final", "send")} className="bg-blue-600 text-white rounded-l px-4 py-2 text-sm font-medium hover:bg-blue-700 disabled:opacity-50">{saving ? "Saving…" : "Save and Send"}</button>
+            <button disabled={saving} onClick={() => save("final", isPurchase ? null : "send")} className="bg-blue-600 text-white rounded-l px-4 py-2 text-sm font-medium hover:bg-blue-700 disabled:opacity-50">{saving ? "Saving…" : isPurchase ? "Save" : "Save and Send"}</button>
             <button disabled={saving} aria-label="More save options" onClick={() => setSaveMenu((o) => !o)} className="bg-blue-600 text-white rounded-r px-2 border-l border-blue-400 hover:bg-blue-700"><ChevronDown size={15} /></button>
             {saveMenu && (
               <div className="absolute bottom-full mb-1 left-0 w-52 bg-white border border-gray-200 rounded-lg shadow-lg text-sm z-40">
                 <button className="w-full text-left px-3 py-2 hover:bg-gray-50" onClick={() => save("final", "print")}>Save and Print</button>
-                <button className="w-full text-left px-3 py-2 hover:bg-gray-50" onClick={() => save("final", "share")}>Save and Share</button>
-                <button className="w-full text-left px-3 py-2 hover:bg-gray-50" onClick={() => save("final", "later")}>Save and Send Later</button>
+                {!isPurchase && <button className="w-full text-left px-3 py-2 hover:bg-gray-50" onClick={() => save("final", "share")}>Save and Share</button>}
+                {!isPurchase && <button className="w-full text-left px-3 py-2 hover:bg-gray-50" onClick={() => save("final", "later")}>Save and Send Later</button>}
               </div>
             )}
           </div>
