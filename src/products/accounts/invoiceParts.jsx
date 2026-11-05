@@ -2,12 +2,13 @@ import React, { useState, useEffect, useRef } from "react";
 import { Plus, Trash2, X } from "lucide-react";
 import { todayISO, inr, inputCls, Field } from "../../shared";
 import * as api from "./data";
-import { buildSplitReceiptLines, round2 } from "./calc";
+import { buildSplitReceiptLines, round2, rankOptions } from "./calc";
 
 /* ---------- a dropdown with search AND a "+ Create new" row ---------- */
-export function CreatablePicker({ options, value, onChange, placeholder, createLabel, onCreate }) {
+export function CreatablePicker({ options, value, onChange, placeholder, createLabel, onCreate, showOnFocus = true, minChars = 0, maxResults = 30 }) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(0);
   const ref = useRef(null);
   const selected = options.find((o) => o.id === value);
   useEffect(() => {
@@ -15,8 +16,24 @@ export function CreatablePicker({ options, value, onChange, placeholder, createL
     document.addEventListener("mousedown", h);
     return () => document.removeEventListener("mousedown", h);
   }, []);
-  const q = query.trim().toLowerCase();
-  const matches = (q ? options.filter((o) => (o.label + " " + (o.sublabel || "")).toLowerCase().includes(q)) : options).slice(0, 30);
+  const q = query.trim();
+  // Type-ahead mode (showOnFocus=false): nothing is listed until you start typing, then only the best matches.
+  const listing = q.length >= minChars && (q.length > 0 || showOnFocus);
+  const matches = listing ? rankOptions(options, q, maxResults) : [];
+  const choose = (o) => { onChange(o.id); setQuery(""); setOpen(false); setActive(0); };
+  const onKeyDown = (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); setOpen(true); setActive((a) => Math.min(a + 1, Math.max(matches.length - 1, 0))); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setActive((a) => Math.max(a - 1, 0)); }
+    else if (e.key === "Enter") { if (open && matches[active]) { e.preventDefault(); choose(matches[active]); } }
+    else if (e.key === "Escape") { setOpen(false); }
+  };
+  const mark = (text) => {
+    const first = q.split(/\s+/).filter(Boolean)[0];
+    if (!first) return text;
+    const i = String(text).toLowerCase().indexOf(first.toLowerCase());
+    if (i < 0) return text;
+    return <>{text.slice(0, i)}<mark className="bg-yellow-100 text-inherit rounded-sm">{text.slice(i, i + first.length)}</mark>{text.slice(i + first.length)}</>;
+  };
   return (
     <div ref={ref} className="relative">
       {selected ? (
@@ -25,14 +42,16 @@ export function CreatablePicker({ options, value, onChange, placeholder, createL
           <button type="button" aria-label="Clear selection" onClick={() => { onChange(""); setQuery(""); }} className="text-gray-400 hover:text-black ml-2 shrink-0"><X size={15} /></button>
         </div>
       ) : (
-        <input className={inputCls} placeholder={placeholder} value={query} onFocus={() => setOpen(true)} onChange={(e) => { setQuery(e.target.value); setOpen(true); }} />
+        <input className={inputCls} placeholder={placeholder} value={query} autoComplete="off" onFocus={() => setOpen(true)} onKeyDown={onKeyDown}
+          onChange={(e) => { setQuery(e.target.value); setOpen(true); setActive(0); }} />
       )}
-      {open && !selected && (
+      {open && !selected && listing && (
         <div className="absolute z-30 left-0 right-0 mt-1 bg-white border border-gray-300 rounded-lg shadow-lg max-h-72 overflow-y-auto">
           {matches.length === 0 && <p className="text-xs text-gray-400 px-3 py-3">No matches.</p>}
-          {matches.map((o) => (
-            <button key={o.id} type="button" onClick={() => { onChange(o.id); setQuery(""); setOpen(false); }} className="w-full text-left px-3 py-2.5 text-sm hover:bg-gray-50 border-b border-gray-100">
-              <div className="font-medium">{o.label}</div>
+          {matches.map((o, i) => (
+            <button key={o.id} type="button" data-active={i === active ? "true" : "false"} onMouseEnter={() => setActive(i)} onClick={() => choose(o)}
+              className={`w-full text-left px-3 py-2.5 text-sm border-b border-gray-100 ${i === active ? "bg-blue-50" : "hover:bg-gray-50"}`}>
+              <div className="font-medium">{mark(o.label)}</div>
               {o.sublabel && <div className="text-xs text-gray-400">{o.sublabel}</div>}
             </button>
           ))}
