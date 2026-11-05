@@ -526,16 +526,20 @@ export function safeFileName(...parts) {
 }
 
 // ---------------- bill (paper) sizes ----------------
+// Every bill keeps at least 1 cm of white space on all four sides, whatever the paper size.
+export const MIN_MARGIN_MM = 10;
 export const PAPER_SIZES = {
   a4: { label: "A4 (210 × 297 mm)", page: "A4", margin: "12mm", font: 12, layout: "full" },
   a4l: { label: "A4 Landscape", page: "A4 landscape", margin: "10mm", font: 12, layout: "full" },
-  a5: { label: "A5 (148 × 210 mm)", page: "A5", margin: "8mm", font: 10, layout: "full" },
-  a5l: { label: "A5 Landscape (210 × 148 mm)", page: "A5 landscape", margin: "8mm", font: 10, layout: "full" },
-  a6: { label: "A6 (105 × 148 mm)", page: "A6", margin: "5mm", font: 8.5, layout: "compact" },
+  a5: { label: "A5 (148 × 210 mm)", page: "A5", margin: "10mm", font: 10, layout: "full" },
+  a5l: { label: "A5 Landscape (210 × 148 mm)", page: "A5 landscape", margin: "10mm", font: 10, layout: "full" },
+  a6: { label: "A6 (105 × 148 mm)", page: "A6", margin: "10mm", font: 8.5, layout: "compact" },
   letter: { label: "Letter (8.5 × 11 in)", page: "Letter", margin: "12mm", font: 12, layout: "full" },
-  thermal80: { label: "Thermal receipt, 80 mm roll", page: "80mm auto", margin: "3mm", font: 10, layout: "receipt", width: "74mm" },
-  thermal58: { label: "Thermal receipt, 58 mm roll", page: "58mm auto", margin: "2mm", font: 9, layout: "receipt", width: "54mm" },
+  thermal80: { label: "Thermal receipt, 80 mm roll", page: "80mm auto", margin: "10mm", font: 9.5, layout: "receipt", width: "60mm" },
+  thermal58: { label: "Thermal receipt, 58 mm roll", page: "58mm auto", margin: "10mm", font: 8, layout: "receipt", width: "38mm" },
 };
+/** The page margin actually used: never less than 1 cm. */
+export const pageMarginMm = (P) => Math.max(MIN_MARGIN_MM, parseFloat(P?.margin) || 0);
 
 // ---------------- ledger statement (view a customer / vendor / any ledger) ----------------
 export const VOUCHER_LABELS = { sales_invoice: "Sales Invoice", proforma_invoice: "Proforma", credit_note: "Credit Note", other_income: "Other Income", purchase_invoice: "Purchase", expense: "Expense", debit_note: "Debit Note", receipt: "Receipt", payment: "Payment", journal: "Journal" };
@@ -575,4 +579,36 @@ export function gstSummaryByRate(totals) {
   const rows = Object.values(byRate).sort((a, b) => a.rate - b.rate).map((r) => ({ ...r, tax: round2(r.cgst + r.sgst + r.igst) }));
   const sum = (k) => round2(rows.reduce((s, r) => s + r[k], 0));
   return { rows, total: { taxable: sum("taxable"), cgst: sum("cgst"), sgst: sum("sgst"), igst: sum("igst"), tax: sum("tax") }, hasTax: rows.some((r) => r.tax > 0) };
+}
+
+
+// ---------------- type-ahead suggestions (item search while typing) ----------------
+/**
+ * Ranks options for what was typed. Every typed word must match somewhere (name, group, code, HSN, rate...).
+ * Names that START with the typed text come first, then words inside the name, then the other details.
+ */
+export function rankOptions(options, query, limit = 8) {
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) return options.slice(0, limit);
+  const tokens = q.split(/\s+/).filter(Boolean);
+  const words = (t) => t.split(/[^a-z0-9]+/).filter(Boolean);
+  const scored = [];
+  for (const o of options) {
+    const label = String(o.label || "").toLowerCase();
+    const other = `${o.sublabel || ""} ${o.keywords || ""}`.toLowerCase();
+    let total = 0, ok = true;
+    for (const t of tokens) {
+      let sc;
+      if (label.startsWith(t)) sc = 0;
+      else if (words(label).some((w) => w.startsWith(t))) sc = 1;
+      else if (label.includes(t)) sc = 2;
+      else if (words(other).some((w) => w.startsWith(t))) sc = 3;
+      else if (other.includes(t)) sc = 4;
+      else { ok = false; break; }
+      total += sc;
+    }
+    if (ok) scored.push({ o, total, label });
+  }
+  scored.sort((a, b) => a.total - b.total || a.label.localeCompare(b.label));
+  return scored.slice(0, limit).map((x) => x.o);
 }
