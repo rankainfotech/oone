@@ -210,7 +210,7 @@ export default function AccountsApp() {
           {screen === "ledgers" && <LedgersScreen ledgers={ledgers} items={items} vouchers={vouchers} lines={lines} business={business} businessId={businessId} reload={loadBusinessData} showToast={showToast} onOpenLightbox={setLightboxUrl} />}
           {screen === "sales" && <SalesScreen goSettings={() => setScreen("settings")} businessId={businessId} ledgers={ledgers} items={items} vouchers={vouchers} lines={lines} allocations={allocations} business={business} reload={loadBusinessData} showToast={showToast} onOpenLightbox={setLightboxUrl} />}
           {screen === "paymentsReceipts" && <PaymentsReceiptsScreen businessId={businessId} ledgers={ledgers} vouchers={vouchers} allocations={allocations} business={business} reload={loadBusinessData} showToast={showToast} />}
-          {screen === "purchases" && <PurchasesScreen businessId={businessId} ledgers={ledgers} items={items} vouchers={vouchers} business={business} reload={loadBusinessData} showToast={showToast} onOpenLightbox={setLightboxUrl} />}
+          {screen === "purchases" && <PurchasesScreen lines={lines} allocations={allocations} goSettings={() => setScreen("settings")} businessId={businessId} ledgers={ledgers} items={items} vouchers={vouchers} business={business} reload={loadBusinessData} showToast={showToast} onOpenLightbox={setLightboxUrl} />}
           {screen === "reports" && <ReportsScreen ledgers={ledgers} lines={lines} vouchers={vouchers} business={business} />}
           {screen === "settings" && <SettingsScreen business={business} businessId={businessId} showToast={showToast} reloadBusinesses={loadBusinesses} />}
           {screen === "profile" && <BusinessProfileScreen business={business} reload={loadBusinesses} showToast={showToast} />}
@@ -969,15 +969,69 @@ function PurchaseInvoiceForm({ businessId, ledgers, items, vtype, business, onCa
   );
 }
 
-function PurchasesScreen({ businessId, ledgers, items, vouchers, business, reload, showToast, onOpenLightbox }) {
-  const [mode, setMode] = useState("list");
-  const purchaseVouchers = vouchers.filter((v) => ["purchase_invoice", "expense", "debit_note"].includes(v.vtype));
-  if (mode === "purchase") return <PurchaseInvoiceForm businessId={businessId} ledgers={ledgers} items={items} vtype="purchase_invoice" business={business} reload={reload} onCancel={() => setMode("list")} onSaved={async () => { await reload(); setMode("list"); }} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
-  if (mode === "expense") return <PurchaseInvoiceForm businessId={businessId} ledgers={ledgers} items={items} vtype="expense" business={business} reload={reload} onCancel={() => setMode("list")} onSaved={async () => { await reload(); setMode("list"); }} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
-  if (mode === "debit") return <PurchaseInvoiceForm businessId={businessId} ledgers={ledgers} items={items} vtype="debit_note" business={business} reload={reload} onCancel={() => setMode("list")} onSaved={async () => { await reload(); setMode("list"); }} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
+function PurchasesScreen({ businessId, ledgers, items, vouchers, lines, allocations, business, reload, showToast, onOpenLightbox, goSettings }) {
+  const [mode, setMode] = useState("list"); // list | bill | expense | debit
+  const [cfg, setCfg] = useState(null);
+  const [busyId, setBusyId] = useState(null);
+  const rows = vouchers.filter((v) => ["purchase_invoice", "expense", "debit_note"].includes(v.vtype));
+  const nameOf = (id) => ledgers.find((l) => l.id === id)?.name || "—";
+  const TYPE = { purchase_invoice: "Purchase invoice", expense: "Expense", debit_note: "Debit note" };
+  const statusOf = (v) => {
+    if (v.vtype !== "purchase_invoice") return null;
+    if ((v.meta || {}).status === "draft") return { label: "Draft", cls: "bg-gray-100 text-gray-600" };
+    const paid = allocations.filter((a) => a.invoice_voucher_id === v.id).reduce((s, a) => s + Number(a.amount), 0);
+    if (paid >= v.total - 0.5) return { label: "Paid", cls: "bg-green-50 text-green-700" };
+    if (paid > 0) return { label: "Partly paid", cls: "bg-yellow-50 text-yellow-700" };
+    return { label: "Unpaid", cls: "bg-red-50 text-red-700" };
+  };
+  const openNew = () => { setCfg({ initial: null }); setMode("bill"); };
+  const openBill = async (v) => {
+    setBusyId(v.id);
+    try { const [its, atts] = await Promise.all([api.fetchVoucherItems(v.id), api.fetchAttachments(v.id)]); setCfg({ initial: { voucher: v, items: its, attachments: atts } }); setMode("bill"); }
+    catch (e) { showToast(e.message); } finally { setBusyId(null); }
+  };
+  const remove = async (v) => {
+    if (!window.confirm(`Delete ${v.voucher_no}? Its accounting entries are removed too. This cannot be undone.`)) return;
+    try { await api.deleteVoucher(v.id); await reload(); showToast("Deleted"); } catch (e) { showToast(e.message); }
+  };
+  const done = async () => { await reload(); setMode("list"); setCfg(null); };
+
+  if (mode === "bill") return <InvoiceForm key={cfg.initial?.voucher?.id || "new-purchase"} businessId={businessId} ledgers={ledgers} items={items} vtype="purchase_invoice" business={business} initial={cfg.initial} convertFrom={null} vouchers={vouchers} allocations={allocations} lines={lines} reload={reload} goSettings={goSettings} onCancel={() => { setMode("list"); setCfg(null); }} onSaved={done} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
+  if (mode === "expense") return <PurchaseInvoiceForm businessId={businessId} ledgers={ledgers} items={items} vtype="expense" business={business} reload={reload} onCancel={() => setMode("list")} onSaved={done} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
+  if (mode === "debit") return <PurchaseInvoiceForm businessId={businessId} ledgers={ledgers} items={items} vtype="debit_note" business={business} reload={reload} onCancel={() => setMode("list")} onSaved={done} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
+
   return (
-    <VoucherListScreen title="Purchases" vouchers={purchaseVouchers} ledgers={ledgers} onOpenNew={() => setMode("purchase")} newLabel="Purchase Invoice"
-      extraButtons={<><button onClick={() => setMode("expense")} className="border border-gray-300 rounded px-3 py-2 text-sm">Expense</button><button onClick={() => setMode("debit")} className="border border-gray-300 rounded px-3 py-2 text-sm">Debit Note</button></>} />
+    <div>
+      <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+        <h2 className="font-display text-xl">Purchases</h2>
+        <div className="flex gap-2">
+          <button onClick={() => setMode("expense")} className="border border-gray-300 rounded px-3 py-2 text-sm">Expense</button>
+          <button onClick={() => setMode("debit")} className="border border-gray-300 rounded px-3 py-2 text-sm">Debit Note</button>
+          <button onClick={openNew} className="bg-black text-white rounded px-3.5 py-2 text-sm font-medium flex items-center gap-1.5"><Plus size={15} /> New Purchase Invoice</button>
+        </div>
+      </div>
+      {rows.length === 0 ? <p className="text-sm text-gray-400 text-center py-10">No purchases recorded yet.</p> : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead><tr className="text-left text-xs text-gray-400 border-b border-gray-200"><th className="py-2 pr-2">Date</th><th className="py-2 pr-2">Voucher no.</th><th className="py-2 pr-2">Type</th><th className="py-2 pr-2">Vendor / ledger</th><th className="py-2 pr-2">Status</th><th className="py-2 pr-2 text-right">Total</th><th className="py-2"></th></tr></thead>
+            <tbody>{rows.map((v) => {
+              const st = statusOf(v); const clickable = v.vtype === "purchase_invoice";
+              return (
+                <tr key={v.id} className={`border-b border-gray-100 ${clickable ? "hover:bg-gray-50 cursor-pointer" : ""}`} onClick={() => clickable && openBill(v)}>
+                  <td className="py-2.5 pr-2 whitespace-nowrap">{v.vdate}</td>
+                  <td className="py-2.5 pr-2">{v.voucher_no}{v.reference && <div className="text-[11px] text-gray-400">Vendor bill {v.reference}</div>}</td>
+                  <td className="py-2.5 pr-2">{TYPE[v.vtype]}</td>
+                  <td className="py-2.5 pr-2">{nameOf(v.party_ledger_id)}</td>
+                  <td className="py-2.5 pr-2">{st && <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${st.cls}`}>{st.label}</span>}</td>
+                  <td className="py-2.5 pr-2 text-right tabnum">{inr(v.total)}</td>
+                  <td className="py-2.5 text-right" onClick={(e) => e.stopPropagation()}><button disabled={busyId === v.id} aria-label={`Delete ${v.voucher_no}`} onClick={() => remove(v)} className="text-gray-300 hover:text-red-600"><Trash2 size={14} /></button></td>
+                </tr>
+              );
+            })}</tbody>
+          </table>
+        </div>
+      )}
+    </div>
   );
 }
 
