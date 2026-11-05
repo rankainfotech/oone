@@ -25,7 +25,7 @@ export default function SettingsScreen({ business, businessId, showToast, reload
       <div className="flex gap-4 border-b border-gray-200 mb-5 text-sm overflow-x-auto">
         {tabs.map(([k, l]) => <button key={k} onClick={() => setTab(k)} className={`pb-2.5 whitespace-nowrap ${tab === k ? "font-semibold border-b-2 border-black" : "text-gray-400"}`}>{l}</button>)}
       </div>
-      {tab === "format" && <BillFormatTab settings={settings} save={(p) => saveSettings(p)} />}
+      {tab === "format" && <BillFormatTab settings={settings} businessName={business?.name} save={(p) => saveSettings(p)} />}
       {tab === "fields" && <FieldsTab fields={settings.invoice_fields || []} save={(f) => saveSettings({ invoice_fields: f })} showToast={showToast} />}
       {tab === "taxes" && <TaxesTab businessId={businessId} showToast={showToast} />}
       {tab === "adjust" && <AdjustTab presets={settings.adjustment_presets || []} save={(p) => saveSettings({ adjustment_presets: p })} />}
@@ -243,14 +243,66 @@ const NUMBER_TYPES = [
   ["sales_invoice", "Tax invoice", "INV-"], ["proforma_invoice", "Proforma invoice", "PF-"], ["receipt", "Receipt", "RCT-"], ["payment", "Payment", "PMT-"],
   ["purchase_invoice", "Purchase invoice", "PUR-"], ["expense", "Expense", "EXP-"], ["debit_note", "Debit note", "DN-"], ["other_income", "Other income", "OI-"],
 ];
-function BillFormatTab({ settings, save }) {
+/** Reads an image and shrinks it, keeping transparency (PNG) so a signature or stamp prints cleanly. */
+export function fileToPngDataUrl(file, maxW = 400, maxH = 200) {
+  return new Promise((resolve, reject) => {
+    if (!file || !String(file.type).startsWith("image/")) { reject(new Error("Please choose an image file.")); return; }
+    if (file.size > 3 * 1024 * 1024) { reject(new Error("The image is larger than 3 MB.")); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, maxW / img.width, maxH / img.height);
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(img.width * scale)); canvas.height = Math.max(1, Math.round(img.height * scale));
+        canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/png"));
+      };
+      img.onerror = () => reject(new Error("That image could not be read."));
+      img.src = reader.result;
+    };
+    reader.onerror = () => reject(new Error("That file could not be read."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function ImageUpload({ label, value, onChange, hint }) {
+  const ref = React.useRef(null);
+  const [err, setErr] = useState("");
+  const pick = async (e) => {
+    const f = e.target.files?.[0]; e.target.value = "";
+    if (!f) return;
+    try { setErr(""); onChange(await fileToPngDataUrl(f)); } catch (x) { setErr(x.message); }
+  };
+  return (
+    <div>
+      <label className="text-xs font-medium text-gray-500 block mb-1.5">{label}</label>
+      <div className="flex items-center gap-3">
+        <div className="w-28 h-16 border border-dashed border-gray-300 rounded flex items-center justify-center bg-gray-50 overflow-hidden">
+          {value ? <img alt={label} src={value} className="max-w-full max-h-full object-contain" /> : <span className="text-[10px] text-gray-400">No image</span>}
+        </div>
+        <div className="space-y-1.5">
+          <input ref={ref} type="file" accept="image/*" aria-label={`${label} file`} className="hidden" onChange={pick} />
+          <button type="button" onClick={() => ref.current?.click()} className="text-xs border border-gray-300 rounded px-3 py-1.5 hover:border-black block">{value ? "Change" : "Upload"}</button>
+          {value && <button type="button" onClick={() => onChange("")} className="text-xs text-red-600 block">Remove</button>}
+        </div>
+      </div>
+      {hint && <p className="text-[10px] text-gray-400 mt-1">{hint}</p>}
+      {err && <p role="alert" className="text-[11px] text-red-600 mt-1">{err}</p>}
+    </div>
+  );
+}
+
+function BillFormatTab({ settings, businessName, save }) {
   const [paper, setPaper] = useState(settings.paper_size || "a4");
   const [numbering, setNumbering] = useState(() => Object.fromEntries(NUMBER_TYPES.map(([k, , d]) => [k, normalizeNumbering(settings.numbering?.[k], d)])));
   const [bank, setBank] = useState({ account_name: "", bank_name: "", account_number: "", ifsc: "", branch: "", upi: "", ...(settings.invoice_bank || {}) });
+  const [sig, setSig] = useState({ show: settings.signature?.show !== false, designation: settings.signature?.designation || "", signature_image: settings.signature?.signature_image || "", stamp_image: settings.signature?.stamp_image || "" });
+  const [po, setPo] = useState({ item_details: settings.print_options?.item_details !== false, item_code: !!settings.print_options?.item_code });
   const today = new Date().toISOString().slice(0, 10);
   const setNum = (k, patch) => setNumbering((n) => ({ ...n, [k]: { ...n[k], ...patch } }));
   const bankField = (key, label, ph) => <Field label={label}><input aria-label={label} className={inputCls} value={bank[key] || ""} placeholder={ph} onChange={(e) => setBank((b) => ({ ...b, [key]: e.target.value }))} /></Field>;
-  const submit = () => save({ paper_size: paper, numbering: Object.fromEntries(NUMBER_TYPES.map(([k, , d]) => [k, normalizeNumbering(numbering[k], d)])), invoice_bank: bank });
+  const submit = () => save({ paper_size: paper, numbering: Object.fromEntries(NUMBER_TYPES.map(([k, , d]) => [k, normalizeNumbering(numbering[k], d)])), invoice_bank: bank, signature: sig, print_options: po });
   const P = PAPER_SIZES[paper];
   return (
     <div className="space-y-6">
@@ -300,6 +352,34 @@ function BillFormatTab({ settings, save }) {
           {bankField("branch", "Branch", "")}
           {bankField("upi", "UPI ID (optional)", "name@bank")}
         </div>
+      </section>
+      <section className="bg-white border border-gray-200 rounded-lg p-5 space-y-3">
+        <h3 className="font-display text-lg">Signature &amp; stamp</h3>
+        <p className="text-[11px] text-gray-500">Printed at the bottom right of every sales bill: “For <b>{businessName || "your company"}</b>” (taken from your Business Profile), then your stamp and signature, then the designation.</p>
+        <label className="flex items-center gap-2 text-sm"><input type="checkbox" aria-label="Show signature on bills" checked={sig.show} onChange={(e) => setSig({ ...sig, show: e.target.checked })} /> Print signature block on bills</label>
+        <Field label="Designation"><input aria-label="Designation" className={inputCls} value={sig.designation} onChange={(e) => setSig({ ...sig, designation: e.target.value })} placeholder="e.g. Authorised Signatory, Proprietor, Partner" /></Field>
+        <div className="grid sm:grid-cols-2 gap-4">
+          <ImageUpload label="Stamp image" value={sig.stamp_image} onChange={(v) => setSig({ ...sig, stamp_image: v })} hint="Your company stamp. A PNG with a see-through background looks best." />
+          <ImageUpload label="Signature image" value={sig.signature_image} onChange={(v) => setSig({ ...sig, signature_image: v })} hint="The signature is placed over the stamp, as on a signed bill." />
+        </div>
+        <div aria-label="Signature preview" className="border border-gray-200 rounded p-3 bg-gray-50">
+          <p className="text-[10px] text-gray-400 mb-1">Preview (bottom right of the bill)</p>
+          <div className="ml-auto w-48 text-center">
+            <div className="text-xs font-bold mb-1">For {businessName || "Company"}</div>
+            <div className="relative h-16">
+              {sig.stamp_image && <img alt="" src={sig.stamp_image} className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 max-h-16 max-w-[11rem] opacity-90" style={{ mixBlendMode: "multiply" }} />}
+              {sig.signature_image && <img alt="" src={sig.signature_image} className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 max-h-10 max-w-[7rem]" style={{ mixBlendMode: "multiply" }} />}
+            </div>
+            <div className="text-xs font-bold border-t border-black pt-0.5">{sig.designation || "Authorised Signatory"}</div>
+          </div>
+        </div>
+      </section>
+
+      <section className="bg-white border border-gray-200 rounded-lg p-5 space-y-2">
+        <h3 className="font-display text-lg">What to print under each item</h3>
+        <p className="text-[11px] text-gray-500">While you make a bill you always see the item code and the product details. These choices decide what is <b>printed</b>.</p>
+        <label className="flex items-start gap-2 text-sm"><input type="checkbox" className="mt-1" aria-label="Print additional product details" checked={po.item_details} onChange={(e) => setPo({ ...po, item_details: e.target.checked })} /> <span>Print additional product details under the item <span className="text-gray-400">(Carat, Unique ID… only the ones marked “Show on invoice” in the product)</span></span></label>
+        <label className="flex items-start gap-2 text-sm"><input type="checkbox" className="mt-1" aria-label="Print item code" checked={po.item_code} onChange={(e) => setPo({ ...po, item_code: e.target.checked })} /> <span>Print the item code under the item <span className="text-gray-400">(off = the code shows while entering but not on the printed bill)</span></span></label>
       </section>
       <button onClick={submit} className="bg-black text-white rounded px-6 py-2.5 text-sm font-medium">Save bill format</button>
     </div>
