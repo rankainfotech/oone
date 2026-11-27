@@ -241,7 +241,7 @@ function TermsTab({ settings, save }) {
 /* ---------------- bill format: paper size, numbering, bank details ---------------- */
 const NUMBER_TYPES = [
   ["sales_invoice", "Tax invoice", "INV-"], ["proforma_invoice", "Proforma invoice", "PF-"], ["receipt", "Receipt", "RCT-"], ["payment", "Payment", "PMT-"],
-  ["purchase_invoice", "Purchase invoice", "PUR-"], ["expense", "Expense", "EXP-"], ["debit_note", "Debit note", "DN-"], ["other_income", "Other income", "OI-"],
+  ["purchase_invoice", "Purchase invoice", "PUR-"], ["expense", "Expense", "EXP-"], ["debit_note", "Debit note", "DN-"], ["credit_note", "Credit note", "CN-"], ["journal", "Journal entry", "JV-"], ["other_income", "Other income", "OI-"],
 ];
 /** Reads an image and shrinks it, keeping transparency (PNG) so a signature or stamp prints cleanly. */
 export function fileToPngDataUrl(file, maxW = 400, maxH = 200) {
@@ -355,20 +355,20 @@ function BillFormatTab({ settings, businessName, save }) {
       </section>
       <section className="bg-white border border-gray-200 rounded-lg p-5 space-y-3">
         <h3 className="font-display text-lg">Signature &amp; stamp</h3>
-        <p className="text-[11px] text-gray-500">Printed at the bottom right of every sales bill: “For <b>{businessName || "your company"}</b>” (taken from your Business Profile), then your stamp and signature, then the designation.</p>
+        <p className="text-[11px] text-gray-500">Printed at the bottom right of every sales bill: “For <b>{businessName || "your company"}</b>” (taken from your Business Profile), then your stamp and signature side by side, then the designation.</p>
         <label className="flex items-center gap-2 text-sm"><input type="checkbox" aria-label="Show signature on bills" checked={sig.show} onChange={(e) => setSig({ ...sig, show: e.target.checked })} /> Print signature block on bills</label>
         <Field label="Designation"><input aria-label="Designation" className={inputCls} value={sig.designation} onChange={(e) => setSig({ ...sig, designation: e.target.value })} placeholder="e.g. Authorised Signatory, Proprietor, Partner" /></Field>
         <div className="grid sm:grid-cols-2 gap-4">
           <ImageUpload label="Stamp image" value={sig.stamp_image} onChange={(v) => setSig({ ...sig, stamp_image: v })} hint="Your company stamp. A PNG with a see-through background looks best." />
-          <ImageUpload label="Signature image" value={sig.signature_image} onChange={(v) => setSig({ ...sig, signature_image: v })} hint="The signature is placed over the stamp, as on a signed bill." />
+          <ImageUpload label="Signature image" value={sig.signature_image} onChange={(v) => setSig({ ...sig, signature_image: v })} hint="Shown beside the stamp, so neither hides the other." />
         </div>
         <div aria-label="Signature preview" className="border border-gray-200 rounded p-3 bg-gray-50">
           <p className="text-[10px] text-gray-400 mb-1">Preview (bottom right of the bill)</p>
           <div className="ml-auto w-48 text-center">
             <div className="text-xs font-bold mb-1">For {businessName || "Company"}</div>
-            <div className="relative h-16">
-              {sig.stamp_image && <img alt="" src={sig.stamp_image} className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 max-h-16 max-w-[11rem] opacity-90" style={{ mixBlendMode: "multiply" }} />}
-              {sig.signature_image && <img alt="" src={sig.signature_image} className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 max-h-10 max-w-[7rem]" style={{ mixBlendMode: "multiply" }} />}
+            <div className="flex items-center justify-center gap-2 min-h-16">
+              {sig.stamp_image && <img alt="" src={sig.stamp_image} className="max-h-16 max-w-[5.5rem] object-contain" style={{ mixBlendMode: "multiply" }} />}
+              {sig.signature_image && <img alt="" src={sig.signature_image} className="max-h-14 max-w-[6rem] object-contain" style={{ mixBlendMode: "multiply" }} />}
             </div>
             <div className="text-xs font-bold border-t border-black pt-0.5">{sig.designation || "Authorised Signatory"}</div>
           </div>
