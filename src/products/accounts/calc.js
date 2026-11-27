@@ -609,6 +609,469 @@ export function rankOptions(options, query, limit = 8) {
     }
     if (ok) scored.push({ o, total, label });
   }
-  scored.sort((a, b) => a.total - b.total || a.label.localeCompare(b.label));
+  scored.sort((a, b) => a.total - b.total || (a.o.priority || 0) - (b.o.priority || 0) || a.label.localeCompare(b.label));
   return scored.slice(0, limit).map((x) => x.o);
+}
+
+
+/** Paying a vendor, split across Cash and Bank: Dr the vendor for the sum, Cr each cash / bank ledger. */
+export function buildSplitPaymentLines({ partyLedgerId, parts }) {
+  const clean = (parts || []).map((p) => ({ ledgerId: p.ledgerId ?? p.ledger_id, amount: round2(p.amount) })).filter((p) => p.amount > 0);
+  if (!clean.length) throw new Error("Enter an amount to pay.");
+  if (clean.some((p) => !p.ledgerId)) throw new Error("Choose a bank account for every Bank amount.");
+  const total = round2(clean.reduce((s, p) => s + p.amount, 0));
+  return [{ ledgerId: partyLedgerId, debit: total, credit: 0 }, ...clean.map((p) => ({ ledgerId: p.ledgerId, debit: 0, credit: p.amount }))];
+}
+
+// ======================= Dashboard & reports =======================
+const pad2 = (n) => String(n).padStart(2, "0");
+const lastDayOf = (y, m) => new Date(Date.UTC(y, m, 0)).getUTCDate();
+const addDaysISO = (iso, n) => { const d = new Date(iso + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** Date range for a named period. from/to are null for "all time". */
+export function periodRange(preset, todayISO, custom = {}) {
+  const [y, m] = todayISO.split("-").map(Number);
+  switch (preset) {
+    case "thisFY": return fyRange(todayISO);
+    case "lastFY": return fyRange(`${fyStartYear(todayISO) - 1}-04-01`);
+    case "thisMonth": return { from: `${y}-${pad2(m)}-01`, to: `${y}-${pad2(m)}-${pad2(lastDayOf(y, m))}` };
+    case "lastMonth": { const py = m === 1 ? y - 1 : y; const pm = m === 1 ? 12 : m - 1; return { from: `${py}-${pad2(pm)}-01`, to: `${py}-${pad2(pm)}-${pad2(lastDayOf(py, pm))}` }; }
+    case "last30": return { from: addDaysISO(todayISO, -29), to: todayISO };
+    case "all": return { from: null, to: null };
+    default: return { from: custom.from || null, to: custom.to || null };
+  }
+}
+
+const inRange = (d, from, to) => !!d && (!from || d >= from) && (!to || d <= to);
+const isFinal = (v) => (v.meta?.status ?? "final") !== "draft";
+
+/** Debit / credit movement per ledger inside a period. */
+export function ledgerMovements(lines, vouchers, from, to) {
+  const date = Object.fromEntries(vouchers.map((v) => [v.id, v.vdate]));
+  const out = {};
+  for (const l of lines) {
+    if (!inRange(date[l.voucher_id], from, to)) continue;
+    const m = (out[l.ledger_id] = out[l.ledger_id] || { debit: 0, credit: 0 });
+    m.debit = round2(m.debit + (Number(l.debit) || 0)); m.credit = round2(m.credit + (Number(l.credit) || 0));
+  }
+  return out;
+}
+
+/** Income and expenses for every month of the period (empty months included). */
+export function monthlySeries(ledgers, lines, vouchers, from, to) {
+  const nature = Object.fromEntries(ledgers.map((l) => [l.id, groupInfo(l.group_key).nature]));
+  const date = Object.fromEntries(vouchers.map((v) => [v.id, v.vdate]));
+  const buckets = {};
+  for (const l of lines) {
+    const d = date[l.voucher_id]; if (!inRange(d, from, to)) continue;
+    const n = nature[l.ledger_id]; if (n !== "income" && n !== "expense") continue;
+    const k = d.slice(0, 7); const b = (buckets[k] = buckets[k] || { income: 0, expense: 0 });
+    if (n === "income") b.income += (Number(l.credit) || 0) - (Number(l.debit) || 0); else b.expense += (Number(l.debit) || 0) - (Number(l.credit) || 0);
+  }
+  const keys = Object.keys(buckets).sort();
+  const start = (from || keys[0] || "").slice(0, 7), end = (to || keys[keys.length - 1] || "").slice(0, 7);
+  if (!start || !end) return [];
+  const out = []; let [y, m] = start.split("-").map(Number); const [ey, em] = end.split("-").map(Number);
+  while (y < ey || (y === ey && m <= em)) {
+    const k = `${y}-${pad2(m)}`; const b = buckets[k] || { income: 0, expense: 0 };
+    out.push({ month: k, label: `${MONTHS[m - 1]} ${String(y).slice(-2)}`, income: round2(b.income), expense: round2(b.expense) });
+    m++; if (m > 12) { m = 1; y++; }
+  }
+  return out.slice(-24);
+}
+
+/** Expenses by ledger in a period, biggest first. */
+export function expenseBreakdown(ledgers, lines, vouchers, from, to) {
+  const mv = ledgerMovements(lines, vouchers, from, to);
+  return ledgers.filter((l) => groupInfo(l.group_key).nature === "expense")
+    .map((l) => ({ ledgerId: l.id, name: l.name, amount: round2((mv[l.id]?.debit || 0) - (mv[l.id]?.credit || 0)) }))
+    .filter((r) => r.amount > 0.005).sort((a, b) => b.amount - a.amount);
+}
+
+/** Quantity and value of stock per item (weighted average cost), from final purchase and sales bills. */
+export function stockRegister(items, voucherItems, vouchers, asOf) {
+  const vById = Object.fromEntries(vouchers.map((v) => [v.id, v]));
+  const tracked = items.filter((i) => i.affects_inventory);
+  const state = Object.fromEntries(tracked.map((i) => { const q = Number(i.opening_qty) || 0, a = Number(i.opening_amount) || 0; return [i.id, { qty: q, value: a, avg: q > 0 ? a / q : 0 }]; }));
+  const events = voucherItems.filter((x) => x.item_id && state[x.item_id] && vById[x.voucher_id])
+    .map((x) => ({ x, v: vById[x.voucher_id] }))
+    .filter(({ v }) => isFinal(v) && (v.vtype === "purchase_invoice" || v.vtype === "sales_invoice") && (!asOf || v.vdate <= asOf))
+    .sort((a, b) => (a.v.vdate === b.v.vdate ? String(a.v.voucher_no).localeCompare(String(b.v.voucher_no)) : a.v.vdate < b.v.vdate ? -1 : 1));
+  for (const { x, v } of events) {
+    const s = state[x.item_id]; const q = Number(x.qty) || 0;
+    if (v.vtype === "purchase_invoice") {
+      const amt = (Number(x.amount) || 0) - (Number(x.extra?.discount) || 0);
+      s.qty += q; s.value += amt; if (s.qty > 0) s.avg = s.value / s.qty;
+    } else {
+      const cost = s.qty > 0 ? s.avg * Math.min(q, s.qty) : 0;
+      s.qty -= q; s.value = s.qty > 0 ? Math.max(0, s.value - cost) : 0;
+    }
+  }
+  const rows = tracked.map((i) => { const s = state[i.id]; return { itemId: i.id, name: i.name, unit: i.unit || "", qty: round2(s.qty), avgCost: round2(s.qty > 0 ? s.value / s.qty : s.avg), value: round2(Math.max(0, s.value)), negative: s.qty < -0.0001 }; })
+    .sort((a, b) => a.name.localeCompare(b.name));
+  return { rows, totalValue: round2(rows.reduce((s, r) => s + r.value, 0)) };
+}
+
+const CASH_GROUPS = ["cash_in_hand", "bank_accounts"];
+/** Cash flow statement: opening cash+bank, what came in and went out by purpose, closing. Always ties to the cash and bank ledgers. */
+export function cashFlowStatement(ledgers, lines, vouchers, from, to) {
+  const cashIds = new Set(ledgers.filter((l) => CASH_GROUPS.includes(l.group_key)).map((l) => l.id));
+  const gOf = Object.fromEntries(ledgers.map((l) => [l.id, l.group_key]));
+  const vById = Object.fromEntries(vouchers.map((v) => [v.id, v]));
+  let opening = 0;
+  for (const l of ledgers) if (cashIds.has(l.id)) { const o = Number(l.opening_balance) || 0; opening += l.opening_side === "Cr" ? -o : o; }
+  const byVoucher = {};
+  for (const ln of lines) { if (!vById[ln.voucher_id]) continue; (byVoucher[ln.voucher_id] = byVoucher[ln.voucher_id] || []).push(ln); }
+  const rowsMap = {};
+  const classify = (group, inflow) => {
+    const info = groupInfo(group);
+    if (group === "sundry_debtors") return ["Operating", inflow ? "Received from customers" : "Paid to customers"];
+    if (group === "sundry_creditors") return ["Operating", inflow ? "Received from vendors" : "Paid to vendors"];
+    if (group === "duties_taxes") return ["Operating", inflow ? "Tax refunds / collected" : "Taxes paid"];
+    if (info.nature === "income") return ["Operating", "Other income received"];
+    if (info.nature === "expense") return ["Operating", inflow ? "Expense refunds" : "Expenses paid"];
+    if (["fixed_assets", "investments", "loans_advances"].includes(group)) return ["Investing", inflow ? `Sale / recovery of ${info.name}` : `Purchase of ${info.name}`];
+    if (["capital_account", "loans_liability"].includes(group)) return ["Financing", inflow ? "Capital / loans received" : "Capital withdrawn / loans repaid"];
+    return ["Operating", inflow ? "Other receipts" : "Other payments"];
+  };
+  for (const [vid, vl] of Object.entries(byVoucher)) {
+    const d = vById[vid].vdate;
+    const cashNet = round2(vl.filter((l) => cashIds.has(l.ledger_id)).reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0));
+    if (from && d < from) { opening += cashNet; continue; }
+    if (to && d > to) continue;
+    if (cashNet === 0) continue;
+    const counter = vl.filter((l) => !cashIds.has(l.ledger_id));
+    if (!counter.length) continue;   // moving money between cash and bank
+    const main = counter.reduce((a, b) => ((Number(b.debit) || 0) + (Number(b.credit) || 0) > (Number(a.debit) || 0) + (Number(a.credit) || 0) ? b : a));
+    const [section, label] = classify(gOf[main.ledger_id], cashNet > 0);
+    const r = (rowsMap[`${section}|${label}`] = rowsMap[`${section}|${label}`] || { section, label, inflow: 0, outflow: 0 });
+    if (cashNet > 0) r.inflow = round2(r.inflow + cashNet); else r.outflow = round2(r.outflow - cashNet);
+  }
+  opening = round2(opening);
+  const sections = ["Operating", "Investing", "Financing"].map((name) => {
+    const rows = Object.values(rowsMap).filter((r) => r.section === name).sort((a, b) => a.label.localeCompare(b.label));
+    const inflow = round2(rows.reduce((s, r) => s + r.inflow, 0)), outflow = round2(rows.reduce((s, r) => s + r.outflow, 0));
+    return { name, rows, inflow, outflow, net: round2(inflow - outflow) };
+  });
+  const inflow = round2(sections.reduce((s, x) => s + x.inflow, 0)), outflow = round2(sections.reduce((s, x) => s + x.outflow, 0));
+  return { opening, sections, inflow, outflow, net: round2(inflow - outflow), closing: round2(opening + inflow - outflow) };
+}
+
+/** Sales per salesperson (final tax invoices only): invoiced, collected and still to collect. */
+export function salesBySalesperson(vouchers, allocations, from, to) {
+  const paid = {}; for (const a of allocations || []) paid[a.invoice_voucher_id] = round2((paid[a.invoice_voucher_id] || 0) + Number(a.amount || 0));
+  const groups = {};
+  for (const v of vouchers) {
+    if (v.vtype !== "sales_invoice" || !isFinal(v) || !inRange(v.vdate, from, to)) continue;
+    const id = v.meta?.salesperson_id || null, nm = v.meta?.salesperson_name || "";
+    const key = id || (nm ? `name:${nm.toLowerCase()}` : "none");
+    const g = (groups[key] = groups[key] || { key, name: nm || (id ? "(removed salesperson)" : "No salesperson"), count: 0, net: 0, tax: 0, total: 0, collected: 0, invoices: [] });
+    const tax = round2((Number(v.cgst) || 0) + (Number(v.sgst) || 0) + (Number(v.igst) || 0) + (Number(v.other_tax) || 0));
+    const collected = Math.min(Number(v.total) || 0, paid[v.id] || 0);
+    g.count += 1; g.net = round2(g.net + (Number(v.subtotal) || 0)); g.tax = round2(g.tax + tax); g.total = round2(g.total + (Number(v.total) || 0)); g.collected = round2(g.collected + collected);
+    g.invoices.push({ id: v.id, date: v.vdate, no: v.voucher_no, partyId: v.party_ledger_id, total: round2(v.total), collected: round2(collected), outstanding: round2((Number(v.total) || 0) - collected) });
+  }
+  const rows = Object.values(groups).map((g) => ({ ...g, outstanding: round2(g.total - g.collected), invoices: g.invoices.sort((a, b) => (a.date < b.date ? 1 : -1)) }))
+    .sort((a, b) => (a.key === "none") - (b.key === "none") || b.net - a.net);
+  const sum = (k) => round2(rows.reduce((s, r) => s + r[k], 0));
+  const totals = { count: rows.reduce((s, r) => s + r.count, 0), net: sum("net"), tax: sum("tax"), total: sum("total"), collected: sum("collected"), outstanding: sum("outstanding") };
+  return { rows: rows.map((r) => ({ ...r, share: totals.net > 0 ? round2((r.net / totals.net) * 100) : 0 })), totals };
+}
+
+/** One search box over parties, products and bills. */
+export function searchAccounts(query, { ledgers = [], items = [], vouchers = [] }) {
+  const q = String(query || "").trim();
+  if (q.length < 2) return { ledgers: [], items: [], vouchers: [] };
+  const nameOf = Object.fromEntries(ledgers.map((l) => [l.id, l.name]));
+  const typeOf = (l) => (l.kind === "customer" ? "Customer" : l.kind === "vendor" ? "Vendor" : groupInfo(l.group_key).name);
+  const pick = (opts) => rankOptions(opts, q, 6).map((o) => o.src);
+  return {
+    ledgers: pick(ledgers.filter((l) => !l.system_key).map((l) => ({ label: l.name, sublabel: typeOf(l), keywords: [l.mobile, l.email, l.gstin, l.pan, l.city].filter(Boolean).join(" "), src: l }))),
+    items: pick(items.map((i) => ({ label: i.name, sublabel: i.group_name || "", keywords: [i.item_code, i.hsn_sac, i.rfid, i.group_name].filter(Boolean).join(" "), src: i }))),
+    vouchers: pick(vouchers.filter((v) => v.vtype !== "journal").map((v) => ({ label: String(v.voucher_no || ""), sublabel: nameOf[v.party_ledger_id] || "", keywords: [nameOf[v.party_ledger_id], v.reference, v.narration, v.po_number, String(v.total), VOUCHER_LABELS[v.vtype]].filter(Boolean).join(" "), src: v }))),
+  };
+}
+
+// ======================= Credit / debit notes =======================
+/** Credit note (sales return): the reverse of a sales invoice. Dr Sales Returns + GST output, Cr Customer. */
+export function buildCreditNoteLines({ partyLedgerId, salesReturnLedgerId, gstLedgers, invoiceTotals }) {
+  const { subtotal, cgst, sgst, igst, otherTax, roundOff, total } = invoiceTotals;
+  const lines = [{ ledgerId: salesReturnLedgerId, debit: subtotal, credit: 0 }];
+  if (cgst) lines.push({ ledgerId: gstLedgers.cgst_out, debit: cgst, credit: 0 });
+  if (sgst) lines.push({ ledgerId: gstLedgers.sgst_out, debit: sgst, credit: 0 });
+  if (igst) lines.push({ ledgerId: gstLedgers.igst_out, debit: igst, credit: 0 });
+  if (otherTax) lines.push({ ledgerId: gstLedgers.other_tax_out, debit: otherTax, credit: 0 });
+  if (roundOff > 0) lines.push({ ledgerId: gstLedgers.round_off, debit: roundOff, credit: 0 });
+  if (roundOff < 0) lines.push({ ledgerId: gstLedgers.round_off, debit: 0, credit: -roundOff });
+  lines.push({ ledgerId: partyLedgerId, debit: 0, credit: total });
+  return lines.filter((l) => l.debit || l.credit);
+}
+/** Debit note (purchase return): the reverse of a purchase invoice. Dr Vendor, Cr Purchase Returns + GST input. */
+export function buildDebitNoteLines({ partyLedgerId, purchaseReturnLedgerId, gstLedgers, invoiceTotals }) {
+  const { subtotal, cgst, sgst, igst, otherTax, roundOff, total } = invoiceTotals;
+  const lines = [{ ledgerId: partyLedgerId, debit: total, credit: 0 }, { ledgerId: purchaseReturnLedgerId, debit: 0, credit: subtotal }];
+  if (cgst) lines.push({ ledgerId: gstLedgers.cgst_in, debit: 0, credit: cgst });
+  if (sgst) lines.push({ ledgerId: gstLedgers.sgst_in, debit: 0, credit: sgst });
+  if (igst) lines.push({ ledgerId: gstLedgers.igst_in, debit: 0, credit: igst });
+  if (otherTax) lines.push({ ledgerId: gstLedgers.other_tax_in, debit: 0, credit: otherTax });
+  if (roundOff > 0) lines.push({ ledgerId: gstLedgers.round_off, debit: 0, credit: roundOff });
+  if (roundOff < 0) lines.push({ ledgerId: gstLedgers.round_off, debit: -roundOff, credit: 0 });
+  return lines.filter((l) => l.debit || l.credit);
+}
+
+/** Journal entry: free Dr / Cr lines. Returns an error message, or null if it can be posted. */
+export function validateJournal(rows) {
+  const has = (r) => (Number(r.debit) || 0) > 0 || (Number(r.credit) || 0) > 0;
+  const all = rows || [];
+  if (all.some((r) => !r.ledgerId && has(r))) return "Choose a ledger on every line that has an amount.";
+  if (all.some((r) => (Number(r.debit) || 0) > 0 && (Number(r.credit) || 0) > 0)) return "A line can be either a debit or a credit, not both.";
+  const used = all.filter((r) => r.ledgerId && has(r));
+  if (used.length < 2) return "A journal entry needs at least two lines.";
+  const dr = round2(used.reduce((s2, r) => s2 + (Number(r.debit) || 0), 0)), cr = round2(used.reduce((s2, r) => s2 + (Number(r.credit) || 0), 0));
+  if (Math.abs(dr - cr) > 0.005) return `Debits (${dr}) and credits (${cr}) must be equal. The difference is ${round2(Math.abs(dr - cr))}.`;
+  return null;
+}
+export const journalLines = (rows) => rows.filter((r) => r.ledgerId && ((Number(r.debit) || 0) > 0 || (Number(r.credit) || 0) > 0)).map((r) => ({ ledgerId: r.ledgerId, debit: round2(r.debit || 0), credit: round2(r.credit || 0), narration: r.narration || null }));
+
+// ======================= GSTIN =======================
+const GST_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+export function gstinCheckChar(first14) {
+  let sum = 0;
+  for (let i = 0; i < 14; i++) { const p = GST_CHARS.indexOf(first14[i]) * (i % 2 === 0 ? 1 : 2); sum += Math.floor(p / 36) + (p % 36); }
+  return GST_CHARS[(36 - (sum % 36)) % 36];
+}
+/** Checks a GSTIN's format, state code and check character. (This does not ask the GST portal whether it is registered.) */
+export function validateGstin(raw) {
+  const g = String(raw || "").trim().toUpperCase();
+  if (!g) return { valid: false, empty: true };
+  if (g.length !== 15) return { valid: false, reason: "A GSTIN has 15 characters." };
+  if (!/^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/.test(g)) return { valid: false, reason: "The format is wrong: 2 digits, the 10-character PAN, a digit or letter, Z, and a check character." };
+  if (!VALID_CODES.has(g.slice(0, 2))) return { valid: false, reason: "The first two digits are not a valid state code." };
+  if (gstinCheckChar(g.slice(0, 14)) !== g[14]) return { valid: false, reason: "The last character does not fit the rest, so there is a typing mistake." };
+  return { valid: true, stateCode: g.slice(0, 2), state: stateNameOfCode(g.slice(0, 2)), pan: g.slice(2, 12) };
+}
+
+// ======================= bank statement import =======================
+const MON = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+/** Indian bank dates: dd/mm/yyyy, dd-mm-yy, dd-Mon-yyyy, yyyy-mm-dd, or an Excel date number. Returns yyyy-mm-dd or null. */
+export function parseLooseDate(v) {
+  if (v === null || v === undefined || v === "") return null;
+  if (v instanceof Date && !Number.isNaN(v.getTime())) return v.toISOString().slice(0, 10);
+  if (typeof v === "number") { if (v > 20000 && v < 80000) return new Date(Math.round((v - 25569) * 86400000)).toISOString().slice(0, 10); return null; }
+  const s = String(v).trim();
+  let m = s.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
+  let y, mo, d;
+  if (m) { y = +m[1]; mo = +m[2]; d = +m[3]; }
+  else if ((m = s.match(/^(\d{1,2})[-/. ]([A-Za-z]{3})[A-Za-z]*[-/. ,]*(\d{2,4})/))) { d = +m[1]; mo = MON[m[2].toLowerCase()]; y = +m[3]; }
+  else if ((m = s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})/))) { d = +m[1]; mo = +m[2]; y = +m[3]; }
+  else return null;
+  if (y < 100) y += 2000;
+  if (!mo || mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+  if (d > new Date(Date.UTC(y, mo, 0)).getUTCDate()) return null;
+  return `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+}
+/** "1,23,456.78", "₹ 500 Dr", "(250.00)" ... -> {value, side:'Dr'|'Cr'|null} */
+export function parseMoney(v) {
+  if (v === null || v === undefined || v === "") return { value: 0, side: null };
+  if (typeof v === "number") return { value: Math.abs(v), side: null };
+  let s = String(v).trim(); let side = null; let neg = false;
+  if (/\bdr\b\.?$/i.test(s)) { side = "Dr"; s = s.replace(/\s*dr\.?$/i, ""); } else if (/\bcr\b\.?$/i.test(s)) { side = "Cr"; s = s.replace(/\s*cr\.?$/i, ""); }
+  if (/^\(.*\)$/.test(s)) { neg = true; s = s.slice(1, -1); }
+  s = s.replace(/[₹,\s]|rs\.?/gi, "");
+  if (s.startsWith("-")) { neg = true; s = s.slice(1); }
+  const n = parseFloat(s);
+  if (Number.isNaN(n)) return { value: 0, side };
+  return { value: round2(Math.abs(n)), side, neg };
+}
+const norm = (x) => String(x ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+/** Reads a bank statement (rows of cells from a CSV / Excel sheet) into debit / credit rows. */
+export function parseStatementRows(aoa) {
+  const rows = (aoa || []).map((r) => (Array.isArray(r) ? r : []));
+  let h = -1, cols = {};
+  for (let i = 0; i < Math.min(rows.length, 40); i++) {
+    const cells = rows[i].map(norm);
+    const find = (re, avoid) => { let idx = cells.findIndex((c) => re.test(c) && !(avoid && avoid.test(c))); return idx; };
+    const date = (() => { const a = find(/(txn|transaction|post).*date|^date$/, /value/); return a >= 0 ? a : find(/date/, /value/) >= 0 ? find(/date/, /value/) : find(/date/); })();
+    const debit = find(/withdraw|debit|^dr\b|paid out|money out/), credit = find(/deposit|credit|^cr\b|paid in|money in/), amount = find(/^amount|^txn amount|^transaction amount/);
+    if (date >= 0 && (debit >= 0 || credit >= 0 || amount >= 0)) {
+      cols = { date, debit, credit, amount, desc: find(/narration|description|particulars|details|remarks/), balance: find(/balance/), ref: find(/ref|chq|cheque|utr|instrument/), type: find(/dr\s*\/\s*cr|^type|cr\/dr/) };
+      h = i; break;
+    }
+  }
+  if (h < 0) return { rows: [], skipped: 0, error: "Could not find the column headings. The first rows should have a Date column and Debit/Withdrawal and Credit/Deposit columns (or an Amount column)." };
+  const out = []; let skipped = 0;
+  for (let i = h + 1; i < rows.length; i++) {
+    const r = rows[i]; if (!r.some((c) => String(c ?? "").trim() !== "")) continue;
+    const date = parseLooseDate(r[cols.date]);
+    let debit = 0, credit = 0;
+    if (cols.debit >= 0) debit = parseMoney(r[cols.debit]).value;
+    if (cols.credit >= 0) credit = parseMoney(r[cols.credit]).value;
+    if (cols.amount >= 0 && !debit && !credit) {
+      const a = parseMoney(r[cols.amount]); const t = cols.type >= 0 ? norm(r[cols.type]) : (a.side || "").toLowerCase();
+      if (t.startsWith("dr") || t.startsWith("d") && !t.startsWith("dep") || a.neg) debit = a.value; else if (t.startsWith("cr") || t.startsWith("c") || t.startsWith("dep")) credit = a.value; else credit = a.value;
+    }
+    if (!date || (!debit && !credit)) { skipped++; continue; }
+    out.push({ date, description: String(r[cols.desc] ?? "").trim(), reference: cols.ref >= 0 ? String(r[cols.ref] ?? "").trim() : "", debit, credit, balance: cols.balance >= 0 ? parseMoney(r[cols.balance]).value : null });
+  }
+  return { rows: out, skipped, error: out.length ? null : "No transactions were found under the headings." };
+}
+export const bankRowKey = (r) => [r.date, norm(r.description), round2(r.debit), round2(r.credit), norm(r.reference)].join("|");
+
+// ======================= bank reconciliation (rules, not guesswork) =======================
+const dayDiff = (a, b) => Math.abs(Math.round((Date.parse(a + "T00:00:00Z") - Date.parse(b + "T00:00:00Z")) / 86400000));
+const tokens = (t) => String(t || "").toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2 && !/^\d+$/.test(w) && !["upi", "neft", "imps", "rtgs", "the", "and", "for", "payment", "transfer", "bank", "ref", "txn", "chq", "cheque"].includes(w));
+/**
+ * Matches pending bank statement rows with entries already in the books for that bank ledger.
+ * The amount must be exactly equal. Date, cheque / UTR / reference, voucher number and party name add confidence.
+ * candidates: [{voucherId, date, amount (+ money in, - money out), voucherNo, party, narration, reference, vtype}]
+ */
+export function matchBankRows(bankRows, candidates) {
+  const scored = [];
+  for (const row of bankRows) {
+    const signed = row.credit > 0 ? row.credit : -row.debit;
+    for (const c of candidates) {
+      if (Math.abs(c.amount - signed) > 0.005) continue;
+      const dd = dayDiff(row.date, c.date); if (dd > 30) continue;
+      let score = 30; const reasons = ["amount matches"];
+      if (dd === 0) { score += 40; reasons.push("same date"); } else if (dd <= 2) { score += 32; reasons.push(`${dd} day apart`); } else if (dd <= 5) { score += 15; reasons.push(`${dd} days apart`); } else if (dd <= 10) { score += 5; reasons.push(`${dd} days apart`); }
+      const hay = `${row.description} ${row.reference}`.toLowerCase();
+      const refs = [c.reference, c.voucherNo].filter(Boolean).map((x) => String(x).toLowerCase());
+      if (refs.some((x) => x.length >= 3 && hay.includes(x))) { score += 35; reasons.push("reference / number found"); }
+      const pt = tokens(c.party); if (pt.length && pt.some((w) => hay.includes(w))) { score += 20; reasons.push("party name found"); }
+      scored.push({ rowId: row.id, voucherId: c.voucherId, score, reasons, candidate: c });
+    }
+  }
+  scored.sort((a, b) => b.score - a.score);
+  const usedRow = new Set(), usedV = new Set(), result = {};
+  for (const s of scored) { if (usedRow.has(s.rowId) || usedV.has(s.voucherId)) continue; usedRow.add(s.rowId); usedV.add(s.voucherId); result[s.rowId] = { ...s, level: s.score >= 70 ? "strong" : s.score >= 45 ? "possible" : "weak" }; }
+  for (const row of bankRows) if (!result[row.id]) result[row.id] = { rowId: row.id, level: "none", score: 0, reasons: [], candidate: null };
+  return result;
+}
+/** Suggests the ledger for a bank row from how similar rows were booked before. conf is 0-1. */
+export function suggestBankLedger(row, history) {
+  const rt = new Set(tokens(row.description)); if (!rt.size) return null;
+  const dir = row.credit > 0 ? "in" : "out"; const votes = {}; let total = 0, hits = 0;
+  for (const h of history || []) {
+    if (h.direction !== dir) continue;
+    const ht = tokens(h.description); if (!ht.length) continue;
+    const common = ht.filter((w) => rt.has(w)).length; if (!common) continue;
+    const sim = common / Math.max(rt.size, ht.length);
+    votes[h.ledgerId] = (votes[h.ledgerId] || 0) + sim; total += sim; hits++;
+  }
+  const best = Object.entries(votes).sort((a, b) => b[1] - a[1])[0]; if (!best) return null;
+  const conf = Math.min(0.99, (best[1] / total) * Math.min(1, 0.45 + 0.18 * hits));
+  return { ledgerId: best[0], confidence: round2(conf), basedOn: hits };
+}
+export const confidenceLabel = (c) => (c >= 0.9 ? "High" : c >= 0.6 ? "Medium" : "Low");
+/** Suggests the expense ledger from this party and description's history. history: [{partyId, description, ledgerId}] */
+export function suggestExpenseLedger({ history, partyId, description }) {
+  const dt = new Set(tokens(description)); const votes = {}; let total = 0, hits = 0;
+  for (const h of history || []) {
+    const sameParty = partyId && h.partyId === partyId; const ht = tokens(h.description);
+    const common = ht.filter((w) => dt.has(w)).length; const sim = ht.length && dt.size ? common / Math.max(ht.length, dt.size) : 0;
+    const w = (sameParty ? 1 : 0) + sim * 0.8; if (w <= 0) continue;
+    votes[h.ledgerId] = (votes[h.ledgerId] || 0) + w; total += w; hits++;
+  }
+  const best = Object.entries(votes).sort((a, b) => b[1] - a[1])[0]; if (!best) return null;
+  return { ledgerId: best[0], confidence: round2(Math.min(0.99, (best[1] / total) * Math.min(1, 0.5 + 0.17 * hits))), basedOn: hits };
+}
+
+// ======================= duplicate warnings =======================
+/** Looks for an entry that may already be this one. Warns, never blocks. */
+export function detectDuplicates(candidate, vouchers) {
+  const out = [];
+  for (const v of vouchers) {
+    if (v.id === candidate.id || v.vtype !== candidate.vtype || (v.meta?.status ?? "final") === "draft") continue;
+    const sameParty = candidate.partyId && v.party_ledger_id === candidate.partyId;
+    const sameTotal = Math.abs((Number(v.total) || 0) - (Number(candidate.total) || 0)) < 0.01 && (Number(candidate.total) || 0) > 0;
+    if (candidate.reference && sameParty && v.reference && String(v.reference).trim().toLowerCase() === String(candidate.reference).trim().toLowerCase()) out.push({ id: v.id, voucherNo: v.voucher_no, level: "high", reason: "the same vendor bill number from this vendor was already entered" });
+    else if (sameParty && sameTotal && v.vdate === candidate.date) out.push({ id: v.id, voucherNo: v.voucher_no, level: "high", reason: "same party, amount and date" });
+    else if (sameParty && sameTotal && dayDiff(v.vdate, candidate.date) <= 7) out.push({ id: v.id, voucherNo: v.voucher_no, level: "medium", reason: "same party and amount within a week" });
+  }
+  return out;
+}
+
+// ======================= ageing: who owes you / whom you owe =======================
+const addDaysIso = (iso, n) => { const d = new Date(iso + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+export const BUCKETS = [["current", "Not due"], ["d1_30", "1–30 days"], ["d31_60", "31–60 days"], ["d61_90", "61–90 days"], ["d90", "Over 90 days"]];
+const bucketOf = (overdue) => (overdue <= 0 ? "current" : overdue <= 30 ? "d1_30" : overdue <= 60 ? "d31_60" : overdue <= 90 ? "d61_90" : "d90");
+/** Open bills by party in age buckets, tied back to each party's ledger balance. kind: 'receivable' | 'payable'. */
+export function ageingReport({ vouchers, allocations, ledgers, lines, asOf, kind }) {
+  const type = kind === "payable" ? "purchase_invoice" : "sales_invoice";
+  const vById = Object.fromEntries(vouchers.map((v) => [v.id, v]));
+  const paid = {};
+  for (const a of allocations || []) { const src = vById[a.source_voucher_id]; if (src && src.vdate > asOf) continue; paid[a.invoice_voucher_id] = round2((paid[a.invoice_voucher_id] || 0) + Number(a.amount || 0)); }
+  const dateOf = Object.fromEntries(vouchers.map((v) => [v.id, v.vdate]));
+  const bal = {}; for (const l of ledgers) { const o = Number(l.opening_balance) || 0; bal[l.id] = l.opening_side === "Cr" ? -o : o; }
+  for (const ln of lines || []) if (dateOf[ln.voucher_id] && dateOf[ln.voucher_id] <= asOf) bal[ln.ledger_id] = (bal[ln.ledger_id] || 0) + (Number(ln.debit) || 0) - (Number(ln.credit) || 0);
+  const parties = {};
+  for (const v of vouchers) {
+    if (v.vtype !== type || (v.meta?.status ?? "final") === "draft" || v.vdate > asOf) continue;
+    const payable = round2((Number(v.total) || 0) - (kind === "payable" ? Number(v.tds_amount) || 0 : 0));
+    const open = round2(payable - (paid[v.id] || 0)); if (open <= 0.005) continue;
+    const due = v.meta?.due_date || addDaysIso(v.vdate, Number(v.meta?.terms?.days) || 0);
+    const overdue = Math.round((Date.parse(asOf + "T00:00:00Z") - Date.parse(due + "T00:00:00Z")) / 86400000);
+    const p = (parties[v.party_ledger_id] = parties[v.party_ledger_id] || { partyId: v.party_ledger_id, name: ledgers.find((l) => l.id === v.party_ledger_id)?.name || "—", buckets: { current: 0, d1_30: 0, d31_60: 0, d61_90: 0, d90: 0 }, open: 0, overdueAmount: 0, maxOverdue: 0, bills: [] });
+    const b = bucketOf(overdue); p.buckets[b] = round2(p.buckets[b] + open); p.open = round2(p.open + open);
+    if (overdue > 0) { p.overdueAmount = round2(p.overdueAmount + open); p.maxOverdue = Math.max(p.maxOverdue, overdue); }
+    p.bills.push({ id: v.id, no: v.voucher_no, date: v.vdate, due, overdue: Math.max(0, overdue), open, bucket: b });
+  }
+  const rows = Object.values(parties).map((p) => {
+    const ledgerBal = round2((kind === "payable" ? -1 : 1) * (bal[p.partyId] || 0));
+    const priority = p.overdueAmount <= 0 ? "none" : (p.buckets.d90 > 0 || (p.maxOverdue > 60 && p.overdueAmount >= 100000)) ? "high" : (p.buckets.d61_90 > 0 || p.buckets.d31_60 > 0) ? "medium" : "low";
+    return { ...p, onAccount: round2(ledgerBal - p.open), ledgerBalance: ledgerBal, priority, bills: p.bills.sort((a, b) => b.overdue - a.overdue) };
+  });
+  const order = { high: 0, medium: 1, low: 2, none: 3 };
+  rows.sort((a, b) => order[a.priority] - order[b.priority] || b.overdueAmount - a.overdueAmount || b.open - a.open);
+  const totals = { open: 0, overdue: 0, buckets: { current: 0, d1_30: 0, d31_60: 0, d61_90: 0, d90: 0 } };
+  for (const r of rows) { totals.open = round2(totals.open + r.open); totals.overdue = round2(totals.overdue + r.overdueAmount); for (const [k] of BUCKETS) totals.buckets[k] = round2(totals.buckets[k] + r.buckets[k]); }
+  return { rows, totals };
+}
+
+// ======================= GST report =======================
+/** Outward tax, input credit, and the net GST position for a period (final bills only; notes reduce them). */
+export function gstReport(vouchers, ledgers, from, to) {
+  const gstinOf = Object.fromEntries(ledgers.map((l) => [l.id, l.gstin || ""])); const nameOf = Object.fromEntries(ledgers.map((l) => [l.id, l.name]));
+  const inP = (v) => (v.meta?.status ?? "final") !== "draft" && (!from || v.vdate >= from) && (!to || v.vdate <= to);
+  const sign = { sales_invoice: 1, credit_note: -1, purchase_invoice: 1, debit_note: -1 };
+  const mk = (v, s) => ({ id: v.id, date: v.vdate, type: v.vtype, no: v.voucher_no, party: nameOf[v.party_ledger_id] || "—", gstin: gstinOf[v.party_ledger_id] || "", place: v.meta?.place_of_supply || "", taxable: round2(s * (Number(v.subtotal) || 0)), cgst: round2(s * (Number(v.cgst) || 0)), sgst: round2(s * (Number(v.sgst) || 0)), igst: round2(s * (Number(v.igst) || 0)), other: round2(s * (Number(v.other_tax) || 0)), total: round2(s * (Number(v.total) || 0)) });
+  const outward = vouchers.filter((v) => ["sales_invoice", "credit_note"].includes(v.vtype) && inP(v)).map((v) => mk(v, sign[v.vtype])).sort((a, b) => (a.date < b.date ? -1 : 1));
+  const inward = vouchers.filter((v) => ["purchase_invoice", "debit_note"].includes(v.vtype) && inP(v)).map((v) => mk(v, sign[v.vtype])).sort((a, b) => (a.date < b.date ? -1 : 1));
+  const sum = (rows, k) => round2(rows.reduce((s, r) => s + r[k], 0));
+  const tot = (rows) => ({ taxable: sum(rows, "taxable"), cgst: sum(rows, "cgst"), sgst: sum(rows, "sgst"), igst: sum(rows, "igst"), other: sum(rows, "other"), total: sum(rows, "total") });
+  const b2b = outward.filter((r) => r.gstin), b2c = outward.filter((r) => !r.gstin);
+  const out = tot(outward), inn = tot(inward);
+  const net = { cgst: round2(out.cgst - inn.cgst), sgst: round2(out.sgst - inn.sgst), igst: round2(out.igst - inn.igst) };
+  net.total = round2(net.cgst + net.sgst + net.igst);
+  return { outward, inward, b2b, b2c, totals: { outward: out, b2b: tot(b2b), b2c: tot(b2c), inward: inn }, net };
+}
+
+// ======================= registers =======================
+/** Sales or purchase register: every bill in the period with its totals (credit / debit notes shown as negatives). */
+export function billRegister(vouchers, ledgers, from, to, side) {
+  const types = side === "purchase" ? ["purchase_invoice", "debit_note"] : ["sales_invoice", "credit_note"];
+  const neg = side === "purchase" ? "debit_note" : "credit_note";
+  const g = Object.fromEntries(ledgers.map((l) => [l.id, l]));
+  const rows = vouchers.filter((v) => types.includes(v.vtype) && (v.meta?.status ?? "final") !== "draft" && (!from || v.vdate >= from) && (!to || v.vdate <= to))
+    .sort((a, b) => (a.vdate === b.vdate ? String(a.voucher_no).localeCompare(String(b.voucher_no)) : a.vdate < b.vdate ? -1 : 1))
+    .map((v) => { const s = v.vtype === neg ? -1 : 1; return { id: v.id, date: v.vdate, type: v.vtype === neg ? (side === "purchase" ? "Debit note" : "Credit note") : (side === "purchase" ? "Purchase" : "Sales"), no: v.voucher_no, party: g[v.party_ledger_id]?.name || "—", gstin: g[v.party_ledger_id]?.gstin || "", taxable: round2(s * (Number(v.subtotal) || 0)), tax: round2(s * ((Number(v.cgst) || 0) + (Number(v.sgst) || 0) + (Number(v.igst) || 0) + (Number(v.other_tax) || 0))), total: round2(s * (Number(v.total) || 0)) }; });
+  const sum = (k) => round2(rows.reduce((s, r) => s + r[k], 0));
+  return { rows, totals: { taxable: sum("taxable"), tax: sum("tax"), total: sum("total") } };
+}
+
+// ======================= recurring invoices =======================
+export function nextRecurringDate(dateISO, frequency) {
+  const [y, m, d] = dateISO.split("-").map(Number);
+  if (frequency === "weekly") return addDaysIso(dateISO, 7);
+  const add = frequency === "quarterly" ? 3 : frequency === "yearly" ? 12 : 1;
+  const total = (y * 12 + (m - 1)) + add; const ny = Math.floor(total / 12), nm = (total % 12) + 1;
+  const last = new Date(Date.UTC(ny, nm, 0)).getUTCDate();
+  return `${ny}-${String(nm).padStart(2, "0")}-${String(Math.min(d, last)).padStart(2, "0")}`;
+}
+/** Dates on which a recurring invoice is due up to today (it may be several if it was not opened for a while). */
+export function dueRecurringDates(rec, todayISO, max = 12) {
+  const out = []; let next = rec?.next;
+  while (rec?.active && next && next <= todayISO && (!rec.end || next <= rec.end) && out.length < max) { out.push(next); next = nextRecurringDate(next, rec.frequency); }
+  return { dates: out, next };
 }
