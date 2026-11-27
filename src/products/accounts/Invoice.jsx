@@ -2,8 +2,9 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Plus, Trash2, X, ChevronDown, Paperclip, ScanLine } from "lucide-react";
 import { todayISO, inr, inputCls, Field, BackHeader } from "../../shared";
 import * as api from "./data";
-import { computeInvoiceTotals, buildSalesInvoiceLines, detectSupplyType, INDIAN_STATES, amountInWords, round2, rateFromTotal, ledgerBalanceOf, computeCalculatedFields, gstSummaryByRate, safeFileName, gstNumberProblem, PAPER_SIZES, buildPurchaseInvoiceLines, pageMarginMm } from "./calc";
-import { CreatablePicker, Modal, PaymentPartsEditor, PaymentsPanel, newPart, partsTotal, validateParts, buildReceiptForInvoice } from "./invoiceParts";
+import { computeInvoiceTotals, buildSalesInvoiceLines, detectSupplyType, INDIAN_STATES, amountInWords, round2, rateFromTotal, ledgerBalanceOf, computeCalculatedFields, gstSummaryByRate, safeFileName, gstNumberProblem, PAPER_SIZES, buildPurchaseInvoiceLines, pageMarginMm, groupInfo, buildCreditNoteLines, buildDebitNoteLines, detectDuplicates, nextRecurringDate } from "./calc";
+import { CreatablePicker, Modal, PaymentPartsEditor, PaymentsPanel, newPart, partsTotal, validateParts, buildReceiptForInvoice, buildPaymentForBill } from "./invoiceParts";
+import { LedgerFormBody, emptyLedger, ledgerFormInvalid } from "./LedgerForm";
 
 const fmtDate = (s) => (s ? s.split("-").reverse().join("-") : "");
 const addDays = (dateStr, n) => { const d = new Date(dateStr + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + (Number(n) || 0)); return d.toISOString().slice(0, 10); };
@@ -20,56 +21,53 @@ const addressOf = (o) => [o?.office_no, o?.building_name, o?.street_name, o?.cit
 
 
 /* ---------- create a customer / vendor without leaving the page ---------- */
-export function QuickPartyCreate({ kind, businessId, initialName, onCreated, onCancel, showToast }) {
-  const [f, setF] = useState({ name: initialName || "", mobile: "", email: "", state: "", gst_type: "unregistered", gstin: "" });
+export function QuickPartyCreate({ kind: initialKind, businessId, initialName, onCreated, onCancel, showToast }) {
+  const [kind, setKind] = useState(initialKind === "vendor" ? "vendor" : "customer");
+  const [l, setL] = useState(() => ({ ...emptyLedger(initialKind === "vendor" ? "vendor" : "customer"), name: initialName || "" }));
   const [saving, setSaving] = useState(false);
-  const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
+  const set = (k, v) => setL((p) => ({ ...p, [k]: v }));
+  const switchKind = (k) => { setKind(k); setL((p) => ({ ...p, kind: k, group_key: k === "customer" ? "sundry_debtors" : "sundry_creditors" })); };
   const save = async () => {
-    if (!f.name.trim() || !f.mobile.trim()) { showToast("Name and mobile are required."); return; }
     setSaving(true);
     try {
-      const id = await api.saveLedger({ id: null, business_id: businessId, kind, name: f.name.trim(), mobile: f.mobile.trim(), email: f.email.trim() || null,
-        state: f.state || null, country: "India", gst_type: f.gst_type, gstin: f.gstin.trim() || null,
-        group_key: kind === "customer" ? "sundry_debtors" : "sundry_creditors", opening_balance: 0, opening_side: "Dr" });
+      const id = await api.saveLedger({ ...l, id: null, business_id: businessId, kind, name: l.name.trim(), mobile: l.mobile.trim(), email: l.email.trim() || null,
+        gstin: l.gstin.trim() || null, pan: l.pan.trim() || null, state: l.state || null, country: l.country || "India" });
       onCreated(id);
     } catch (e) {
       showToast(/duplicate|unique/i.test(e.message) ? `That mobile number is already used by another ${kind} in this business.` : e.message);
     } finally { setSaving(false); }
   };
   return (
-    <Modal title={`New ${kind}`} onClose={onCancel}>
-      <div className="space-y-3">
-        <Field label="Name / company *"><input autoFocus className={inputCls} value={f.name} onChange={(e) => set("name", e.target.value)} /></Field>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Mobile *"><input className={inputCls} value={f.mobile} onChange={(e) => set("mobile", e.target.value)} /></Field>
-          <Field label="Email"><input className={inputCls} value={f.email} onChange={(e) => set("email", e.target.value)} /></Field>
+    <Modal title={`New ${kind}`} onClose={onCancel} wide>
+      <div className="space-y-4">
+        <div className="flex gap-2" role="group" aria-label="Party type">
+          {["customer", "vendor"].map((k) => (
+            <button key={k} type="button" aria-pressed={kind === k} onClick={() => switchKind(k)}
+              className={`flex-1 py-1.5 rounded border text-sm font-medium capitalize ${kind === k ? "bg-black text-white border-black" : "bg-white text-gray-600 border-gray-300 hover:border-black"}`}>{k}</button>
+          ))}
         </div>
-        <Field label="State (decides IGST or CGST+SGST)">
-          <select className={inputCls} value={f.state} onChange={(e) => set("state", e.target.value)}>
-            <option value="">Select state…</option>
-            {INDIAN_STATES.map((s) => <option key={s} value={s}>{s}</option>)}
-          </select>
-        </Field>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="GST status"><select className={inputCls} value={f.gst_type} onChange={(e) => set("gst_type", e.target.value)}><option value="unregistered">Unregistered</option><option value="registered">Registered</option><option value="consumer">Consumer</option></select></Field>
-          <Field label="GSTIN"><input className={inputCls} value={f.gstin} onChange={(e) => set("gstin", e.target.value.toUpperCase())} /></Field>
-        </div>
-        <p className="text-[11px] text-gray-400">A GSTIN's first two digits also tell us the state. You can add the address and more details later under Ledgers.</p>
-        <button disabled={saving} onClick={save} className="w-full bg-black text-white rounded py-2.5 text-sm font-medium disabled:opacity-50">{saving ? "Saving…" : `Save ${kind}`}</button>
+        <LedgerFormBody l={l} set={set} />
+        <button disabled={saving || ledgerFormInvalid(l)} onClick={save} className="w-full bg-black text-white rounded py-2.5 text-sm font-medium disabled:opacity-40">{saving ? "Saving…" : `Save ${kind}`}</button>
       </div>
     </Modal>
   );
 }
 
-export function PartyPicker({ kind, ledgers, value, onChange, businessId, reload, showToast, allowAll, placeholder }) {
+export function PartyPicker({ kind, ledgers, value, onChange, businessId, reload, showToast, placeholder }) {
   const [creating, setCreating] = useState(null);
-  const options = ledgers.filter((l) => (allowAll ? !l.system_key : l.kind === kind)).map((l) => ({ id: l.id, label: l.name, sublabel: l.mobile || (allowAll ? l.kind : "") }));
+  // EVERY ledger can be picked (customers, vendors and any other ledger), because one party can be both a
+  // customer and a supplier. The kind this screen is about is listed first.
+  const rank = (l) => (l.kind === kind ? 0 : l.kind === "customer" || l.kind === "vendor" ? 1 : 2);
+  const typeOf = (l) => (l.kind === "customer" ? "Customer" : l.kind === "vendor" ? "Vendor" : groupInfo(l.group_key).name);
+  const options = ledgers.filter((l) => !l.system_key)
+    .map((l) => ({ id: l.id, priority: rank(l), label: l.name, keywords: [l.mobile, l.email, l.gstin, l.city].filter(Boolean).join(" "), sublabel: [typeOf(l), l.mobile].filter(Boolean).join(" · ") }))
+    .sort((a, b) => a.priority - b.priority || a.label.localeCompare(b.label));
   return (
     <>
       <CreatablePicker options={options} value={value} onChange={onChange} placeholder={placeholder || `Search ${kind} by name or mobile…`} createLabel={`New ${kind}`} onCreate={(q) => setCreating(q)} />
       {creating !== null && (
         <QuickPartyCreate kind={kind} businessId={businessId} initialName={creating} showToast={showToast} onCancel={() => setCreating(null)}
-          onCreated={async (id) => { await reload(); onChange(id); setCreating(null); showToast(`${kind === "customer" ? "Customer" : "Vendor"} created`); }} />
+          onCreated={async (id) => { await reload(); onChange(id); setCreating(null); showToast("Created"); }} />
       )}
     </>
   );
@@ -109,7 +107,7 @@ export function invoiceHtml({ business, party, vtype, voucherNo, vdate, dueDate,
   // and must never be printed or shared.
   const P = PAPER_SIZES[paper] || PAPER_SIZES.a4;
   const layout = P.layout;
-  const title = vtype === "proforma_invoice" ? "PROFORMA INVOICE" : vtype === "purchase_invoice" ? "PURCHASE INVOICE" : "TAX INVOICE";
+  const title = vtype === "proforma_invoice" ? "PROFORMA INVOICE" : vtype === "purchase_invoice" ? "PURCHASE INVOICE" : vtype === "credit_note" ? "CREDIT NOTE" : vtype === "debit_note" ? "DEBIT NOTE" : "TAX INVOICE";
   const attrsOf = (l) => (l.attrs || []).map((a) => `${esc(a.label)}: ${esc(a.value)}`).join(" · ");
   const customOf = (l) => lineColumns.map((c) => (l.colValues?.[c.key] !== undefined && l.colValues?.[c.key] !== "" && l.colValues?.[c.key] !== null ? `${esc(c.label)}: ${esc(l.colValues[c.key])}` : "")).filter(Boolean).join(" · ");
   const showDetails = printOptions.item_details !== false;   // "print additional details under each item" (on unless switched off)
@@ -144,7 +142,7 @@ export function invoiceHtml({ business, party, vtype, voucherNo, vdate, dueDate,
   const signHtml = hasSign ? `<div class="sign"><div class="forco">For ${esc(signature.company)}</div><div class="sigbox">${signature.stamp_image ? `<img class="stamp" src="${signature.stamp_image}"/>` : ""}${signature.signature_image ? `<img class="sig" src="${signature.signature_image}"/>` : ""}</div><div class="desig">${esc(signature.designation || "")}</div></div>` : "";
   const customRows = headerFields.map((f) => `<div><b>${esc(f.label)}:</b> ${esc(f.value)}</div>`).join("");
   const meta = `${vendorBillNo ? `<div><b>Vendor bill no.:</b> ${esc(vendorBillNo)}</div>` : ""}<div><b>Date:</b> ${fmtDate(vdate)}</div>${dueDate ? `<div><b>Due date:</b> ${fmtDate(dueDate)}</div>` : ""}${poNumber ? `<div><b>PO No.:</b> ${esc(poNumber)}</div>` : ""}${gstOn && supply.known ? `<div><b>Place of supply:</b> ${esc(supply.partyState)}</div>` : ""}${salespersonName ? `<div><b>Salesperson:</b> ${esc(salespersonName)}</div>` : ""}${customRows}`;
-  const billTo = `<b>${vtype === "purchase_invoice" ? "Supplier" : "Bill To"}</b><br/>${esc(party?.name)}<br/><span class="muted">${esc(addressOf(party))}</span>${party?.gstin ? `<br/>GSTIN: ${esc(party.gstin)}` : ""}${party?.mobile ? `<br/>${esc(party.mobile)}` : ""}`;
+  const billTo = `<b>${vtype === "purchase_invoice" || vtype === "debit_note" ? "Supplier" : "Bill To"}</b><br/>${esc(party?.name)}<br/><span class="muted">${esc(addressOf(party))}</span>${party?.gstin ? `<br/>GSTIN: ${esc(party.gstin)}` : ""}${party?.mobile ? `<br/>${esc(party.mobile)}` : ""}`;
   const seller = `${business.logo ? `<img class="logo" src="${business.logo}"/><br/>` : ""}<h1>${esc(business.name)}</h1><div class="muted">${esc(addressOf(business))}</div><div class="muted">${business.gstin ? `GSTIN: ${esc(business.gstin)} ` : ""}${business.pan ? `PAN: ${esc(business.pan)}` : ""}</div><div class="muted">${[business.mobile, business.email].filter(Boolean).map(esc).join(" · ")}</div>`;
   const head = layout === "receipt"
     ? `<div class="center">${seller}<div class="ttl">${title}</div><div># ${esc(voucherNo)}</div></div><div class="blk">${meta}</div><div class="blk">${billTo}</div>`
@@ -161,9 +159,9 @@ export function invoiceHtml({ business, party, vtype, voucherNo, vdate, dueDate,
   .words{margin:8px 0;font-style:italic} .box{border:1px solid #ddd;padding:6px;margin-top:8px;white-space:pre-wrap} .center{text-align:center} .ttl{font-weight:bold;margin-top:4px}
   .blk{border-top:1px dashed #999;padding:5px 0;margin-top:5px} .it{border-bottom:1px dotted #aaa;padding:3px 0} .row{display:flex;justify-content:space-between}
   .sign{margin-top:12mm;margin-left:auto;width:${layout === "receipt" ? "100%" : "62mm"};text-align:center;page-break-inside:avoid;break-inside:avoid}
-  .sign .forco{font-weight:bold;margin-bottom:2mm} .sigbox{position:relative;height:24mm}
-  .sigbox img{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);max-height:24mm;max-width:${layout === "receipt" ? "34mm" : "58mm"};mix-blend-mode:multiply}
-  .sigbox .stamp{opacity:.85} .sigbox .sig{max-height:16mm;max-width:${layout === "receipt" ? "30mm" : "40mm"}} .sign .desig{font-weight:bold;border-top:1px solid #111;padding-top:2px;margin-top:1mm}`;
+  .sign .forco{font-weight:bold;margin-bottom:2mm} .sigbox{display:flex;justify-content:center;align-items:center;gap:4mm;min-height:24mm;flex-wrap:wrap}
+  .sigbox img{position:static;max-height:24mm;max-width:${layout === "receipt" ? "16mm" : "28mm"};object-fit:contain;mix-blend-mode:multiply}
+  .sigbox .stamp{opacity:.9} .sigbox .sig{max-height:20mm;max-width:${layout === "receipt" ? "16mm" : "30mm"}} .sign .desig{font-weight:bold;border-top:1px solid #111;padding-top:2px;margin-top:1mm}`;
   return `<!doctype html><html><head><meta charset="utf-8"><title>${esc(fileName || `${title} ${voucherNo}`)}</title><style>${css}</style></head><body class="paper-${esc(paper)} layout-${layout}">
   ${head}${itemsHtml}
   <table class="tot"><tr><td>Sub Total</td><td class="r">${money(totals.grossSubtotal)}</td></tr>
@@ -229,10 +227,13 @@ function SendDialog({ info, onClose }) {
 /* ---------- the invoice form ---------- */
 export function InvoiceForm({ businessId, ledgers, items, vtype, business, initial, convertFrom, vouchers = [], allocations = [], lines: postingLines = [], onCancel, onSaved, showToast, reload, onOpenLightbox, goSettings }) {
   const isEdit = !!initial && !convertFrom;
-  const isPurchase = vtype === "purchase_invoice";           // same form, purchase accounting
+  const isCredit = vtype === "credit_note", isDebit = vtype === "debit_note";
+  const isReturn = isCredit || isDebit;                        // a note that reverses part of an earlier bill
+  const isPurchase = vtype === "purchase_invoice" || isDebit;  // purchase side: same form, purchase accounting
   const partyKind = isPurchase ? "vendor" : "customer";
   const partyWord = isPurchase ? "Vendor" : "Customer";
-  const defaultPrefix = vtype === "proforma_invoice" ? "PF-" : isPurchase ? "PUR-" : "INV-";
+  const defaultPrefix = vtype === "proforma_invoice" ? "PF-" : isCredit ? "CN-" : isDebit ? "DN-" : isPurchase ? "PUR-" : "INV-";
+  const docName = isCredit ? "Credit Note" : isDebit ? "Debit Note" : isPurchase ? "Purchase Invoice" : vtype === "proforma_invoice" ? "Proforma Invoice" : "Tax Invoice";
   const sys = sysMap(ledgers);
   const settings = business?.settings || {};
   const fieldDefs = Array.isArray(settings.invoice_fields) ? settings.invoice_fields : [];
@@ -278,6 +279,11 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
   const [saving, setSaving] = useState(false);
   const [dialog, setDialog] = useState(null);
   const [numberTouched, setNumberTouched] = useState(false);
+  const [againstId, setAgainstId] = useState(m0.against_invoice_id || "");
+  const [dupWarn, setDupWarn] = useState(null);
+  const [repeatOn, setRepeatOn] = useState(!!m0.recurring?.active);
+  const [repeatFreq, setRepeatFreq] = useState(m0.recurring?.frequency || "monthly");
+  const [repeatEnd, setRepeatEnd] = useState(m0.recurring?.end || "");
   const [vendorBillNo, setVendorBillNo] = useState(v0?.reference || "");
   const [showBank, setShowBank] = useState(m0.show_bank !== false);
   const [payOn, setPayOn] = useState(false);
@@ -298,8 +304,8 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
   const termDays = terms === "receipt" ? 0 : terms === "custom" ? Number(customDays) || 0 : Number(terms);
   const dueDate = addDays(vdate, termDays);
   const cashLedgerId = sys.cash;
-  const finalExisting = isEdit && vtype === "sales_invoice" && m0.status !== "draft";
-  const canPayOnSave = vtype === "sales_invoice" && !finalExisting;
+  const finalExisting = isEdit && (vtype === "sales_invoice" || vtype === "purchase_invoice") && m0.status !== "draft";
+  const canPayOnSave = (vtype === "sales_invoice" || vtype === "purchase_invoice") && !finalExisting;
   const convertedInvoice = vtype === "proforma_invoice" && m0.converted_to ? vouchers.find((x) => x.id === m0.converted_to) : null;
   const locked = isEdit && !!convertedInvoice;
 
@@ -317,6 +323,9 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
     [totals, headerValues, fieldDefs]);
 
   const custBal = party ? ledgerBalanceOf(party, postingLines) : null;
+  const originalType = isCredit ? "sales_invoice" : "purchase_invoice";
+  const openOf = (inv) => round2((Number(inv.total) || 0) - (isCredit ? 0 : Number(inv.tds_amount) || 0) - allocations.filter((a) => a.invoice_voucher_id === inv.id && a.source_voucher_id !== v0?.id).reduce((s2, a) => s2 + Number(a.amount), 0));
+  const againstOptions = isReturn && partyId ? vouchers.filter((v) => v.vtype === originalType && v.party_ledger_id === partyId && (v.meta?.status ?? "final") !== "draft").map((v) => ({ ...v, open: openOf(v) })) : [];
   const bank = settings.invoice_bank || null;
   const sigCfg = settings.signature;
   const signature = !isPurchase && sigCfg && sigCfg.show !== false && (sigCfg.signature_image || sigCfg.stamp_image || sigCfg.designation)
@@ -414,7 +423,7 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
     try { await api.deleteAttachment(a.id); setAttachments((x) => x.filter((y) => y.id !== a.id)); } catch (e) { showToast(e.message); }
   };
 
-  const save = async (mode, after) => {
+  const save = async (mode, after, force = false) => {
     setSaveMenu(false);
     if (locked) { showToast("This proforma has been converted to a tax invoice and can no longer be changed."); return; }
     if (!partyId) { showToast(`Select a ${partyKind} first.`); return; }
@@ -422,6 +431,10 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
     const validLines = lineItems.filter((l) => (l.item_id || (l.description || "").trim()) && Number(l.qty) > 0);
     if (mode === "final" && !validLines.length) { showToast("Add at least one item with a quantity."); return; }
     const t = computeFor(validLines.length ? validLines : lineItems);
+    if (mode === "final" && !force && ["sales_invoice", "purchase_invoice", "credit_note", "debit_note"].includes(vtype)) {
+      const dups = detectDuplicates({ id: isEdit ? v0.id : undefined, vtype, partyId, total: t.total, date: vdate, reference: isPurchase ? vendorBillNo.trim() : "" }, vouchers);
+      if (dups.length) { setDupWarn({ dups, mode, after }); return; }
+    }
     const recordPayment = payOn && mode === "final" && canPayOnSave && partsTotal(payParts) > 0;
     if (recordPayment) {
       const problem = validateParts(payParts, cashLedgerId, t.total);
@@ -432,36 +445,54 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
       let spName = "";
       if (salespersonId) { try { spName = (await api.fetchSalespersons(businessId)).find((s) => s.id === salespersonId)?.name || ""; } catch (e) { /* ignore */ } }
       const meta = { ...(v0?.meta || {}), status: mode, send_later: after === "later", discount: { type: discountType, value: Number(discountValue) || 0 }, adjustments, extra_taxes: extraTaxes,
-        terms: { type: terms, days: termDays }, due_date: dueDate, terms_text: termsText, salesperson_id: salespersonId || null, salesperson_name: spName, place_of_supply: supply.known ? supply.partyState : null, show_bank: showBank,
+        terms: { type: terms, days: termDays }, due_date: dueDate, terms_text: isPurchase || isCredit ? "" : termsText, salesperson_id: salespersonId || null, salesperson_name: spName, place_of_supply: supply.known ? supply.partyState : null, show_bank: showBank,
         custom_header: headerDefs.map((d) => ({ key: d.key, label: d.label, type: d.type, print: d.showOnPrint !== false, value: d.type === "calculated" ? headerCalc[d.key] : headerValues[d.key] ?? "" })) };
       delete meta.converted_to; delete meta.converted_at;
       if (convertFrom) meta.converted_from = convertFrom.id;
-      const voucher = { id: isEdit ? v0.id : undefined, business_id: businessId, vtype, voucher_no: voucherNo.trim(), vdate, party_ledger_id: partyId, main_ledger_id: isPurchase ? sys.purchases : sys.sales, reference: isPurchase ? vendorBillNo.trim() || null : null,
+      let allocs = [];
+      if (isReturn && againstId) {
+        const inv = vouchers.find((x) => x.id === againstId);
+        if (inv) { meta.against_invoice_id = inv.id; meta.against_invoice_no = inv.voucher_no; const amt = round2(Math.min(t.total, openOf(inv))); if (mode === "final" && amt > 0) allocs = [{ invoice_voucher_id: inv.id, amount: amt }]; }
+      }
+      if (vtype === "sales_invoice" && !m0.generated_from) {
+        if (repeatOn && mode === "final") meta.recurring = { active: true, frequency: repeatFreq, end: repeatEnd || null, next: m0.recurring?.next || nextRecurringDate(vdate, repeatFreq), ...(m0.recurring?.last_generated ? { last_generated: m0.recurring.last_generated } : {}) };
+        else if (m0.recurring) meta.recurring = { ...m0.recurring, active: false };
+      }
+      const voucher = { id: isEdit ? v0.id : undefined, business_id: businessId, vtype, voucher_no: voucherNo.trim(), vdate, party_ledger_id: partyId, main_ledger_id: isCredit ? sys.sales_return : isDebit ? sys.purchase_return : isPurchase ? sys.purchases : sys.sales, reference: isPurchase ? vendorBillNo.trim() || null : null,
         po_number: poNumber, narration, supply_type: supply.type, subtotal: t.subtotal, cgst: t.cgst, sgst: t.sgst, igst: t.igst, other_tax: t.otherTax, round_off: t.roundOff, total: t.total, meta };
       const apiItems = t.lines.map((l, i) => ({ line_no: i + 1, item_id: l.item_id || null, description: l.description, hsn_sac: l.hsn_sac, qty: l.qty, rate: l.rate, amount: l.amount,
         gst_rate: gstOn ? l.gstRate : 0, other_tax_rate: (l.otherTaxes || []).reduce((s, x) => s + (Number(x.rate) || 0), 0), cgst_amt: l.cgstAmt, sgst_amt: l.sgstAmt, igst_amt: l.igstAmt, other_tax_amt: l.otherTaxAmt,
         extra: { discount: l.discountAmt, other_taxes: l.otherTaxBreakdown || [], custom: l.custom || {}, calculated: lineCalcFor(l), attributes: l.attrs || [], item_code: l.code || "" } }));
       // A proforma is NEVER posted to the books; only a final sales invoice posts ledger entries.
       const postLines = mode !== "final" ? []
+        : isCredit ? buildCreditNoteLines({ partyLedgerId: partyId, salesReturnLedgerId: sys.sales_return, gstLedgers: sys, invoiceTotals: t })           // Dr Sales Returns + GST, Cr Customer
+        : isDebit ? buildDebitNoteLines({ partyLedgerId: partyId, purchaseReturnLedgerId: sys.purchase_return, gstLedgers: sys, invoiceTotals: t })       // Dr Vendor, Cr Purchase Returns + GST input
         : isPurchase ? buildPurchaseInvoiceLines({ partyLedgerId: partyId, purchaseLedgerId: sys.purchases, gstLedgers: sys, invoiceTotals: t })   // Dr Purchases + GST input, Cr Vendor
         : vtype === "sales_invoice" ? buildSalesInvoiceLines({ partyLedgerId: partyId, salesLedgerId: sys.sales, gstLedgers: sys, invoiceTotals: t }) : [];
-      const id = convertFrom && mode === "final" ? await api.convertProforma(convertFrom.id, voucher, apiItems, postLines) : await api.saveVoucher(voucher, apiItems, postLines);
+      const id = convertFrom && mode === "final" ? await api.convertProforma(convertFrom.id, voucher, apiItems, postLines) : await api.saveVoucher(voucher, apiItems, postLines, allocs);
       for (const f of pendingFiles) { try { await api.uploadAttachment(businessId, id, f); } catch (e) { showToast(`Invoice saved, but ${f.name} could not be uploaded: ${e.message}`); } }
       if (recordPayment) {
         try {
-          const rno = await api.nextVoucherNumber(businessId, "receipt", "RCT-", settings.numbering?.receipt, payDate);
-          const { receiptVoucher, lines } = buildReceiptForInvoice({ invoice: { id, party_ledger_id: partyId, voucher_no: voucherNo.trim() }, businessId, date: payDate, parts: payParts, cashLedgerId, voucherNo: rno });
-          await api.recordInvoicePayment(id, receiptVoucher, lines);
-        } catch (e) { showToast(`Invoice saved, but the payment could not be recorded: ${e.message} You can record it from the invoice.`); }
+          const payType = isPurchase ? "payment" : "receipt";
+          const rno = await api.nextVoucherNumber(businessId, payType, isPurchase ? "PMT-" : "RCT-", settings.numbering?.[payType], payDate);
+          const inv = { id, party_ledger_id: partyId, voucher_no: voucherNo.trim() };
+          if (isPurchase) {
+            const { paymentVoucher, lines } = buildPaymentForBill({ bill: inv, businessId, date: payDate, parts: payParts, cashLedgerId, voucherNo: rno });
+            await api.recordBillPayment(id, paymentVoucher, lines);
+          } else {
+            const { receiptVoucher, lines } = buildReceiptForInvoice({ invoice: inv, businessId, date: payDate, parts: payParts, cashLedgerId, voucherNo: rno });
+            await api.recordInvoicePayment(id, receiptVoucher, lines);
+          }
+        } catch (e) { showToast(`${isPurchase ? "Purchase invoice" : "Invoice"} saved, but the payment could not be recorded: ${e.message} You can record it from the ${isPurchase ? "bill" : "invoice"}.`); }
       }
 
-      const title = vtype === "proforma_invoice" ? "Proforma invoice" : isPurchase ? "Purchase invoice" : "Invoice";
+      const title = docName;
       const printLines = t.lines.map((l) => ({ ...l, colValues: { ...(l.custom || {}), ...lineCalcFor(l) } }));
       const headerFields = meta.custom_header.filter((f) => f.print && f.value !== "" && f.value !== null && f.value !== undefined).map((f) => ({ label: f.label, value: f.value }));
       const lineColumns = lineDefs.filter((d) => d.showOnPrint !== false).map((d) => ({ key: d.key, label: d.label }));
       // NOTE: the customer's outstanding balance is deliberately NOT passed here: it is for on-screen viewing only.
       const fileName = safeFileName(voucherNo.trim(), party?.name);
-      const html = invoiceHtml({ business, party, vtype, voucherNo: voucherNo.trim(), vdate, dueDate, poNumber, totals: { ...t, lines: printLines }, supply, notes: narration, termsText, headerFields, lineColumns, salespersonName: spName, gstOn, paper: settings.paper_size || "a4", fileName, bank: !isPurchase && showBank && bankConfigured ? settings.invoice_bank : null, vendorBillNo: vendorBillNo.trim(), signature, printOptions: settings.print_options || {} });
+      const html = invoiceHtml({ business, party, vtype, voucherNo: voucherNo.trim(), vdate, dueDate, poNumber, totals: { ...t, lines: printLines }, supply, notes: narration, termsText, headerFields, lineColumns, salespersonName: spName, gstOn, paper: settings.paper_size || "a4", fileName, bank: !isPurchase && !isReturn && showBank && bankConfigured ? settings.invoice_bank : null, vendorBillNo: vendorBillNo.trim(), signature, printOptions: settings.print_options || {} });
       const text = `${title} ${voucherNo.trim()} dated ${fmtDate(vdate)} from ${business.name}: ${inr(t.total)}${termDays ? `, due by ${fmtDate(dueDate)}` : ", due on receipt"}. Thank you!`;
       if (mode === "draft") { showToast("Saved as draft"); onSaved(); }
       else if (after === "print") { printHtml(html, fileName); showToast(`${title} saved`); onSaved(); }
@@ -473,7 +504,7 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
   };
 
   const th = "py-2 pr-2 text-xs font-medium text-gray-500 text-left";
-  const title = vtype === "proforma_invoice" ? "Proforma Invoice" : isPurchase ? "Purchase Invoice" : "Tax Invoice";
+  const title = docName;
   const money = (n) => "₹" + fmt(n);
 
   return (
@@ -522,6 +553,15 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
             ? <Field label="Vendor bill no."><input aria-label="Vendor bill number" className={inputCls} value={vendorBillNo} onChange={(e) => setVendorBillNo(e.target.value)} placeholder="The supplier's own invoice number" /></Field>
             : <Field label="Salesperson"><SalespersonPicker businessId={businessId} value={salespersonId} onChange={setSalespersonId} showToast={showToast} /></Field>}
         </div>
+        {isReturn && (
+          <Field label={isCredit ? "Against invoice (optional)" : "Against bill (optional)"}>
+            <select aria-label="Against invoice" className={inputCls} value={againstId} onChange={(e) => setAgainstId(e.target.value)} disabled={!partyId}>
+              <option value="">{partyId ? (againstOptions.length ? "Not tied to a particular bill" : "No open bills for this party") : `Choose the ${partyKind} first`}</option>
+              {againstOptions.map((v) => <option key={v.id} value={v.id}>{v.voucher_no} · {v.vdate} · ₹{fmt(v.total)} · open ₹{fmt(Math.max(0, v.open))}</option>)}
+            </select>
+            <p className="text-[11px] text-gray-400 mt-1">Choosing the bill lowers what is still owed on it by the amount of this note (up to what is open).</p>
+          </Field>
+        )}
         {headerDefs.length > 0 && (
           <div className="grid sm:grid-cols-3 gap-3">
             {headerDefs.map((d) => (
@@ -570,7 +610,7 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
                       <td className="pl-3 pt-3"><input type="checkbox" aria-label={`Select row ${i + 1}`} checked={selected.includes(l.key)} onChange={() => toggleSel(l.key)} /></td>
                       <td className="py-1.5 pr-2">
                         <CreatablePicker options={items.map((it) => ({ id: it.id, label: it.name, keywords: [it.item_code, it.group_name, it.hsn_sac, it.rfid].filter(Boolean).join(" "), sublabel: [it.group_name, it.item_code && `#${it.item_code}`, Number(isPurchase ? it.purchase_rate : it.sale_rate) ? `₹${isPurchase ? it.purchase_rate : it.sale_rate}` : ""].filter(Boolean).join(" · ") }))}
-                          value={l.item_id} onChange={(id) => pickItem(l.key, id)} placeholder="Start typing item name or code…" showOnFocus={false} minChars={1} maxResults={8} />
+                          value={l.item_id} onChange={(id) => pickItem(l.key, id)} placeholder="Start typing item name or code…" showOnFocus={false} minChars={1} maxResults={8} placement="top" />
                         {l.code && <div aria-label={`Item code ${i + 1}`} className="text-[10px] text-gray-400 mt-0.5">Code: {l.code}</div>}
                         {(l.attrs || []).length > 0 && <div aria-label={`Product details ${i + 1}`} className="text-[11px] text-gray-600 mt-0.5">{l.attrs.map((a) => `${a.label}: ${a.value}`).join(" · ")}</div>}
                         {(l.otherTaxBreakdown || []).length > 0 && <div className="text-[10px] text-gray-400 mt-0.5">+ {l.otherTaxBreakdown.map((t) => `${t.name} ${money(t.amount)}`).join(", ")}</div>}
@@ -602,8 +642,8 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
 
         <div className="grid md:grid-cols-2 gap-5">
           <div className="space-y-4">
-            <Field label="Customer Notes"><textarea rows={3} className={inputCls} value={narration} onChange={(e) => setNarration(e.target.value)} placeholder="Thanks for your business." /></Field>
-            <Field label="Terms & Conditions"><textarea rows={3} className={inputCls} value={termsText} onChange={(e) => setTermsText(e.target.value)} placeholder="Terms and conditions to print on the invoice" /></Field>
+            <Field label={isPurchase ? "Remarks" : isCredit ? "Reason for the credit note / notes" : "Customer Notes"}><textarea aria-label={isPurchase ? "Remarks" : "Customer notes"} rows={3} className={inputCls} value={narration} onChange={(e) => setNarration(e.target.value)} placeholder={isPurchase ? "Any note about this purchase" : "Thanks for your business."} /></Field>
+            {!isPurchase && !isCredit && <Field label="Terms & Conditions"><textarea aria-label="Terms and conditions" rows={3} className={inputCls} value={termsText} onChange={(e) => setTermsText(e.target.value)} placeholder="Terms and conditions to print on the invoice" /></Field>}
             <div>
               <label className="text-xs font-medium text-gray-500 block mb-1.5">Attach files to this invoice</label>
               <input ref={fileRef} type="file" multiple className="hidden" onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }} />
@@ -624,16 +664,29 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
                 ))}
               </div>
             </div>
-            {finalExisting && <PaymentsPanel invoice={v0} vouchers={vouchers} allocations={allocations} ledgers={ledgers} businessId={businessId} reload={reload} showToast={showToast} numbering={settings.numbering?.receipt} />}
+            {vtype === "sales_invoice" && !m0.generated_from && (
+              <div className="border border-gray-200 rounded-lg p-4">
+                <label className="flex items-center gap-2 text-sm font-medium"><input type="checkbox" aria-label="Repeat this invoice" checked={repeatOn} onChange={(e) => setRepeatOn(e.target.checked)} /> Repeat this invoice automatically</label>
+                {!repeatOn && <p className="text-[11px] text-gray-400 mt-1">For fixed monthly charges such as rent or a subscription. The copies are created from the Sales screen, on the days they fall due.</p>}
+                {repeatOn && (
+                  <div className="mt-3 grid grid-cols-2 gap-3">
+                    <Field label="Repeat every"><select aria-label="Repeat every" className={inputCls} value={repeatFreq} onChange={(e) => setRepeatFreq(e.target.value)}><option value="weekly">Week</option><option value="monthly">Month</option><option value="quarterly">3 months</option><option value="yearly">Year</option></select></Field>
+                    <Field label="Stop after (optional)"><input type="date" aria-label="Stop repeating on" className={inputCls} value={repeatEnd} onChange={(e) => setRepeatEnd(e.target.value)} /></Field>
+                    <p className="col-span-2 text-[11px] text-gray-500">Next invoice date: <b>{(m0.recurring?.next || nextRecurringDate(vdate, repeatFreq)).split("-").reverse().join("-")}</b>. Saved with Save and Send / Print / Share / Send Later (not as a draft).</p>
+                  </div>
+                )}
+              </div>
+            )}
+            {finalExisting && <PaymentsPanel purchase={isPurchase} invoice={v0} vouchers={vouchers} allocations={allocations} ledgers={ledgers} businessId={businessId} reload={reload} showToast={showToast} numbering={settings.numbering?.[isPurchase ? "payment" : "receipt"]} />}
             {canPayOnSave && (
               <div className="border border-gray-200 rounded-lg p-4">
-                <label className="flex items-center gap-2 text-sm font-medium"><input type="checkbox" checked={payOn} onChange={(e) => setPayOn(e.target.checked)} /> Payment received now</label>
-                {!payOn && <p className="text-[11px] text-gray-400 mt-1">Tick this if the customer pays when the invoice is made (in Cash, Bank, or both). You can also record payments later from the invoice.</p>}
+                <label className="flex items-center gap-2 text-sm font-medium"><input type="checkbox" checked={payOn} onChange={(e) => setPayOn(e.target.checked)} /> {isPurchase ? "Payment made now" : "Payment received now"}</label>
+                {!payOn && <p className="text-[11px] text-gray-400 mt-1">{isPurchase ? "Tick this if you pay the vendor when the bill is entered (in Cash, Bank, or both). You can also record payments later from the bill." : "Tick this if the customer pays when the invoice is made (in Cash, Bank, or both). You can also record payments later from the invoice."}</p>}
                 {payOn && (
                   <div className="mt-3 space-y-3">
                     <Field label="Payment date"><input type="date" aria-label="Payment date" className={inputCls} value={payDate} onChange={(e) => setPayDate(e.target.value)} /></Field>
-                    <PaymentPartsEditor parts={payParts} setParts={setPayParts} ledgers={ledgers} businessId={businessId} reload={reload} showToast={showToast} outstanding={totals.total} />
-                    <p className="text-[11px] text-gray-400">Recorded as a receipt against this invoice when you use Save and Send / Print / Share / Send Later (not for drafts).</p>
+                    <PaymentPartsEditor parts={payParts} setParts={setPayParts} ledgers={ledgers} businessId={businessId} reload={reload} showToast={showToast} outstanding={totals.total} verb={isPurchase ? "Paying" : "Receiving"} />
+                    <p className="text-[11px] text-gray-400">{isPurchase ? "Recorded as a payment against this bill when you save it (not for drafts)." : "Recorded as a receipt against this invoice when you use Save and Send / Print / Share / Send Later (not for drafts)."}</p>
                   </div>
                 )}
               </div>
@@ -699,7 +752,7 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
                 </tbody>
               </table>
             )}
-            {bankConfigured && !isPurchase && <label className="flex items-center gap-2 text-xs text-gray-600 pt-1"><input type="checkbox" aria-label="Print bank details" checked={showBank} onChange={(e) => setShowBank(e.target.checked)} /> Print bank details on this bill</label>}
+            {bankConfigured && !isPurchase && !isReturn && <label className="flex items-center gap-2 text-xs text-gray-600 pt-1"><input type="checkbox" aria-label="Print bank details" checked={showBank} onChange={(e) => setShowBank(e.target.checked)} /> Print bank details on this bill</label>}
           </div>
         </div>
       </div>
@@ -739,6 +792,17 @@ export function InvoiceForm({ businessId, ledgers, items, vtype, business, initi
               <button onClick={addBulk} disabled={!Object.keys(bulkPick).length} className="w-full mt-3 bg-black text-white rounded py-2.5 text-sm font-medium disabled:opacity-40">Add selected items</button>
             </>
           )}
+        </Modal>
+      )}
+      {dupWarn && (
+        <Modal title="This may be a duplicate" onClose={() => setDupWarn(null)}>
+          <div className="space-y-3" role="alert">
+            <p className="text-sm text-gray-700">An entry like this already exists:</p>
+            <ul className="text-sm space-y-1">{dupWarn.dups.map((d) => <li key={d.id} className="bg-amber-50 border border-amber-100 rounded px-3 py-2"><b>{d.voucherNo}</b> — {d.reason}</li>)}</ul>
+            <p className="text-xs text-gray-500">If it is a different bill, you can save it anyway.</p>
+            <div className="flex gap-2"><button onClick={() => setDupWarn(null)} className="flex-1 border border-gray-300 rounded py-2 text-sm font-medium">Go back and check</button>
+              <button onClick={() => { const w = dupWarn; setDupWarn(null); save(w.mode, w.after, true); }} className="flex-1 bg-black text-white rounded py-2 text-sm font-medium">Save anyway</button></div>
+          </div>
         </Modal>
       )}
       {dialog && <SendDialog info={dialog} onClose={() => { setDialog(null); onSaved(); }} />}
