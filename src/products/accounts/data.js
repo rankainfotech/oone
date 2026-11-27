@@ -13,6 +13,19 @@ function cleanRow(row, numericKeys = []) {
   return { id: id || null, cleaned };
 }
 
+// The database returns at most 1,000 rows per request, so anything that can grow is read page by page.
+// (Reading only the first 1,000 would silently drop entries and give wrong balances.)
+export async function fetchAllPages(makeQuery, pageSize = 1000) {
+  const out = [];
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await makeQuery().range(from, from + pageSize - 1);
+    if (error) throw error;
+    out.push(...(data || []));
+    if (!data || data.length < pageSize) break;
+  }
+  return out;
+}
+
 // ---------------- Businesses ----------------
 export async function fetchBusinesses() {
   const { data, error } = await supabase.from("acc_businesses").select("*").order("created_at");
@@ -42,9 +55,7 @@ export async function startAccountsTrial(tenantId) {
 
 // ---------------- Ledgers ----------------
 export async function fetchLedgers(businessId) {
-  const { data, error } = await supabase.from("acc_ledgers").select("*").eq("business_id", businessId).order("name");
-  if (error) throw error;
-  return data;
+  return fetchAllPages(() => supabase.from("acc_ledgers").select("*").eq("business_id", businessId).order("name").order("id"));
 }
 export async function saveLedger(row) {
   const { id, cleaned } = cleanRow(row, ["opening_balance"]);
@@ -63,9 +74,7 @@ export async function deleteLedgerSafely(id) {
 
 // ---------------- Items ----------------
 export async function fetchItems(businessId) {
-  const { data, error } = await supabase.from("acc_items").select("*").eq("business_id", businessId).order("name");
-  if (error) throw error;
-  return data;
+  return fetchAllPages(() => supabase.from("acc_items").select("*").eq("business_id", businessId).order("name").order("id"));
 }
 const ITEM_NUMERIC_KEYS = ["gst_rate", "other_tax_rate", "opening_qty", "opening_amount", "sale_rate", "purchase_rate"];
 export async function saveItem(row) {
@@ -85,16 +94,14 @@ export async function deleteItemSafely(id) {
 
 // ---------------- Vouchers (invoices, receipts, payments, journals...) ----------------
 export async function fetchVouchers(businessId, vtypes) {
-  let q = supabase.from("acc_vouchers").select("*").eq("business_id", businessId).order("vdate", { ascending: false });
-  if (vtypes) q = q.in("vtype", vtypes);
-  const { data, error } = await q;
-  if (error) throw error;
-  return data;
+  return fetchAllPages(() => {
+    let q = supabase.from("acc_vouchers").select("*").eq("business_id", businessId).order("vdate", { ascending: false }).order("id");
+    if (vtypes) q = q.in("vtype", vtypes);
+    return q;
+  });
 }
 export async function fetchVoucherLines(businessId) {
-  const { data, error } = await supabase.from("acc_voucher_lines").select("*").eq("business_id", businessId);
-  if (error) throw error;
-  return data;
+  return fetchAllPages(() => supabase.from("acc_voucher_lines").select("*").eq("business_id", businessId).order("id"));
 }
 export async function fetchVoucherItems(voucherId) {
   const { data, error } = await supabase.from("acc_voucher_items").select("*").eq("voucher_id", voucherId).order("line_no");
@@ -102,9 +109,7 @@ export async function fetchVoucherItems(voucherId) {
   return data;
 }
 export async function fetchAllocations(businessId) {
-  const { data, error } = await supabase.from("acc_allocations").select("*").eq("business_id", businessId);
-  if (error) throw error;
-  return data;
+  return fetchAllPages(() => supabase.from("acc_allocations").select("*").eq("business_id", businessId).order("id"));
 }
 export async function saveVoucher(voucher, items, lines, allocs = []) {
   // The accounting engine labels ledger lines {ledgerId}; the database expects {ledger_id}.
@@ -127,9 +132,8 @@ export async function deleteVoucher(id) {
  */
 export async function nextVoucherNumber(businessId, vtype, defaultPrefix = "", cfg = null, dateISO = new Date().toISOString().slice(0, 10)) {
   const c = normalizeNumbering(cfg || { prefix: defaultPrefix }, defaultPrefix);
-  const { data, error } = await supabase.from("acc_vouchers").select("voucher_no").eq("business_id", businessId).eq("vtype", vtype).limit(20000);
-  if (error) throw error;
-  return nextVoucherNo((data || []).map((r) => r.voucher_no), c, dateISO);
+  const rows = await fetchAllPages(() => supabase.from("acc_vouchers").select("voucher_no").eq("business_id", businessId).eq("vtype", vtype).order("id"));
+  return nextVoucherNo(rows.map((r) => r.voucher_no), c, dateISO);
 }
 
 // ---------------- Timesheets ----------------
@@ -152,15 +156,17 @@ export async function deleteTimesheet(id) {
 
 // ---------------- Bank import ----------------
 export async function fetchBankRows(businessId, bankLedgerId) {
-  let q = supabase.from("acc_bank_rows").select("*").eq("business_id", businessId).order("txn_date", { ascending: false });
-  if (bankLedgerId) q = q.eq("bank_ledger_id", bankLedgerId);
-  const { data, error } = await q;
-  if (error) throw error;
-  return data;
+  return fetchAllPages(() => {
+    let q = supabase.from("acc_bank_rows").select("*").eq("business_id", businessId).order("txn_date", { ascending: false }).order("id");
+    if (bankLedgerId) q = q.eq("bank_ledger_id", bankLedgerId);
+    return q;
+  });
 }
 export async function insertBankRows(rows) {
-  const { error } = await supabase.from("acc_bank_rows").insert(rows);
-  if (error) throw error;
+  for (let i = 0; i < rows.length; i += 500) {
+    const { error } = await supabase.from("acc_bank_rows").insert(rows.slice(i, i + 500));
+    if (error) throw error;
+  }
 }
 export async function updateBankRow(id, fields) {
   const { error } = await supabase.from("acc_bank_rows").update(fields).eq("id", id);
@@ -258,4 +264,24 @@ export async function updateBusinessSettings(businessId, patch) {
   const { error: e2 } = await supabase.from("acc_businesses").update({ settings: merged }).eq("id", businessId);
   if (e2) throw e2;
   return merged;
+}
+
+/** Every item line of the business (for the inventory register). Read in pages. */
+export async function fetchAllVoucherItems(businessId) {
+  return fetchAllPages(() => supabase.from("acc_voucher_items").select("voucher_id,item_id,qty,rate,amount,extra").eq("business_id", businessId).order("id"));
+}
+
+// ---------------- Paying a purchase invoice (can be split across Cash and Bank) ----------------
+export async function recordBillPayment(billId, paymentVoucher, lines) {
+  const { data, error } = await supabase.rpc("acc_record_bill_payment", { p_bill: billId, p_payment: paymentVoucher, p_lines: toDbLines(lines) });
+  if (error) throw new Error(friendlyDbError(error.message, paymentVoucher.voucher_no));
+  return data;
+}
+
+export async function deleteBankRow(id) {
+  const { error } = await supabase.from("acc_bank_rows").delete().eq("id", id);
+  if (error) throw error;
+}
+export async function fetchTimesheetsPaged(businessId) {
+  return fetchAllPages(() => supabase.from("acc_timesheets").select("*").eq("business_id", businessId).order("tdate", { ascending: false }).order("id"));
 }
