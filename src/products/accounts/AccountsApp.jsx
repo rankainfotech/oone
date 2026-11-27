@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Users, Truck, Package, BookOpen, Receipt, ShoppingCart, FileText,
-  ArrowLeft, LogOut, Plus, Trash2, Pencil, X, Building2, ChevronDown, AlertTriangle, Settings as SettingsIcon, Menu,
+  ArrowLeft, LogOut, Plus, Trash2, Pencil, X, Building2, ChevronDown, AlertTriangle, Settings as SettingsIcon, Menu, ClipboardList, Clock, Landmark,
 } from "lucide-react";
 import { supabase } from "../../supabaseClient";
 import { LOGO_DATA_URI } from "../../logo";
@@ -11,16 +11,20 @@ import * as api from "./data";
 import { InvoiceForm, PartyPicker } from "./Invoice";
 import SettingsScreen from "./Settings";
 import LedgerView from "./LedgerView";
+import Dashboard from "./Dashboard";
+import SalesBySalesperson from "./SalesReport";
+import JournalScreen, { ExpenseLedgerPicker } from "./Journal";
+import TimesheetsScreen from "./Timesheets";
+import BankingScreen from "./Banking";
+import { GstReport, AgeingReport, RegisterReport } from "./ReportsExtra";
+import { generateDueRecurring } from "./recurring";
 import { ItemForm, emptyItem } from "./ItemForm";
+import { LedgerForm, emptyLedger } from "./LedgerForm";
 import {
   computeInvoiceTotals, buildSalesInvoiceLines, buildPurchaseInvoiceLines,
   buildReceiptLines, buildPaymentLines, trialBalance, profitAndLoss, balanceSheet,
-  LEDGER_GROUPS, groupInfo, round2,
+  LEDGER_GROUPS, groupInfo, round2, dueRecurringDates, suggestExpenseLedger, confidenceLabel,
 } from "./calc";
-import {
-  ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
-  PieChart, Pie, Cell,
-} from "recharts";
 
 const FONT_STYLE = `
   @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600;700&display=swap');
@@ -42,6 +46,8 @@ export default function AccountsApp() {
   const [lightboxUrl, setLightboxUrl] = useState(null);
   const [bootError, setBootError] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [pendingOpen, setPendingOpen] = useState(null);
+  const [voucherItems, setVoucherItems] = useState([]);
 
   // data caches for the current business
   const [ledgers, setLedgers] = useState([]);
@@ -91,11 +97,12 @@ export default function AccountsApp() {
 
   const loadBusinessData = async () => {
     if (!businessId) return;
-    const [l, i, v, ln, al] = await Promise.all([
+    const [l, i, v, ln, al, vi] = await Promise.all([
       api.fetchLedgers(businessId), api.fetchItems(businessId), api.fetchVouchers(businessId),
       api.fetchVoucherLines(businessId), api.fetchAllocations(businessId),
+      api.fetchAllVoucherItems(businessId).catch(() => []),     // only needed for the inventory register
     ]);
-    setLedgers(l); setItems(i); setVouchers(v); setLines(ln); setAllocations(al);
+    setLedgers(l); setItems(i); setVouchers(v); setLines(ln); setAllocations(al); setVoucherItems(vi);
   };
   useEffect(() => { loadBusinessData(); }, [businessId]);
 
@@ -161,12 +168,24 @@ export default function AccountsApp() {
   }
 
   const business = businesses.find((b) => b.id === businessId);
+  const openVoucher = (v) => {
+    const full = vouchers.find((x) => x.id === v.id) || v;
+    const t = full.vtype;
+    if (["sales_invoice", "proforma_invoice"].includes(t)) { setPendingOpen(full.id); setScreen("sales"); }
+    else if (t === "purchase_invoice") { setPendingOpen(full.id); setScreen("purchases"); }
+    else if (["receipt", "payment"].includes(t)) setScreen("paymentsReceipts");
+    else if (["expense", "debit_note"].includes(t)) setScreen("purchases");
+    else if (t === "other_income") setScreen("sales");
+  };
   const navItems = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
     { id: "sales", label: "Sales", icon: Receipt },
     { id: "paymentsReceipts", label: "Payments & Receipts", icon: FileText },
     { id: "purchases", label: "Purchases", icon: ShoppingCart },
     { id: "ledgers", label: "Ledgers", icon: BookOpen },
+    { id: "journal", label: "Journal", icon: ClipboardList },
+    { id: "banking", label: "Banking", icon: Landmark },
+    { id: "timesheets", label: "Timesheets", icon: Clock },
     { id: "reports", label: "Reports", icon: LayoutDashboard },
     { id: "settings", label: "Settings", icon: SettingsIcon },
     { id: "profile", label: "Business Profile", icon: Building2 },
@@ -206,12 +225,15 @@ export default function AccountsApp() {
           <span className="font-display text-lg">{navItems.find((n) => n.id === screen)?.label}</span>
         </div>
         <main className="max-w-6xl mx-auto px-4 pt-5 pb-10">
-          {screen === "dashboard" && <Dashboard ledgers={ledgers} lines={lines} vouchers={vouchers} business={business} openScreen={setScreen} />}
+          {screen === "dashboard" && <Dashboard ledgers={ledgers} items={items} lines={lines} vouchers={vouchers} voucherItems={voucherItems} business={business} onOpenVoucher={openVoucher} onNavigate={setScreen} />}
           {screen === "ledgers" && <LedgersScreen ledgers={ledgers} items={items} vouchers={vouchers} lines={lines} business={business} businessId={businessId} reload={loadBusinessData} showToast={showToast} onOpenLightbox={setLightboxUrl} />}
-          {screen === "sales" && <SalesScreen goSettings={() => setScreen("settings")} businessId={businessId} ledgers={ledgers} items={items} vouchers={vouchers} lines={lines} allocations={allocations} business={business} reload={loadBusinessData} showToast={showToast} onOpenLightbox={setLightboxUrl} />}
+          {screen === "sales" && <SalesScreen pendingOpen={pendingOpen} clearPending={() => setPendingOpen(null)} goSettings={() => setScreen("settings")} businessId={businessId} ledgers={ledgers} items={items} vouchers={vouchers} lines={lines} allocations={allocations} business={business} reload={loadBusinessData} showToast={showToast} onOpenLightbox={setLightboxUrl} />}
           {screen === "paymentsReceipts" && <PaymentsReceiptsScreen businessId={businessId} ledgers={ledgers} vouchers={vouchers} allocations={allocations} business={business} reload={loadBusinessData} showToast={showToast} />}
-          {screen === "purchases" && <PurchasesScreen lines={lines} allocations={allocations} goSettings={() => setScreen("settings")} businessId={businessId} ledgers={ledgers} items={items} vouchers={vouchers} business={business} reload={loadBusinessData} showToast={showToast} onOpenLightbox={setLightboxUrl} />}
-          {screen === "reports" && <ReportsScreen ledgers={ledgers} lines={lines} vouchers={vouchers} business={business} />}
+          {screen === "purchases" && <PurchasesScreen pendingOpen={pendingOpen} clearPending={() => setPendingOpen(null)} lines={lines} allocations={allocations} goSettings={() => setScreen("settings")} businessId={businessId} ledgers={ledgers} items={items} vouchers={vouchers} business={business} reload={loadBusinessData} showToast={showToast} onOpenLightbox={setLightboxUrl} />}
+          {screen === "journal" && <JournalScreen businessId={businessId} ledgers={ledgers} vouchers={vouchers} lines={lines} business={business} reload={loadBusinessData} showToast={showToast} />}
+          {screen === "banking" && <BankingScreen businessId={businessId} ledgers={ledgers} vouchers={vouchers} lines={lines} business={business} reload={loadBusinessData} showToast={showToast} />}
+          {screen === "timesheets" && <TimesheetsScreen businessId={businessId} ledgers={ledgers} reload={loadBusinessData} showToast={showToast} />}
+          {screen === "reports" && <ReportsScreen ledgers={ledgers} lines={lines} vouchers={vouchers} allocations={allocations} business={business} onOpenVoucher={openVoucher} />}
           {screen === "settings" && <SettingsScreen business={business} businessId={businessId} showToast={showToast} reloadBusinesses={loadBusinesses} />}
           {screen === "profile" && <BusinessProfileScreen business={business} reload={loadBusinesses} showToast={showToast} />}
         </main>
@@ -380,156 +402,13 @@ function ChooseBusinessScreen({ businesses, onPick, onCreateNew, maxBusinesses }
 }
 
 /* ============ Dashboard ============ */
-function Dashboard({ ledgers, lines, vouchers, business, openScreen }) {
-  const [detail, setDetail] = useState(null); // {kind, title, rows}
-  const lineDates = useMemo(() => Object.fromEntries(vouchers.map((v) => [v.id, v.vdate])), [vouchers]);
-  const asOf = todayISO();
 
-  const balances = useMemo(() => {
-    const totals = {};
-    for (const l of ledgers) totals[l.id] = l.opening_side === "Cr" ? -(Number(l.opening_balance) || 0) : (Number(l.opening_balance) || 0);
-    for (const line of lines) { if (!(line.ledger_id in totals)) totals[line.ledger_id] = 0; totals[line.ledger_id] += (Number(line.debit) || 0) - (Number(line.credit) || 0); }
-    return totals;
-  }, [ledgers, lines]);
 
-  const byGroup = (groupKeys) => ledgers.filter((l) => groupKeys.includes(l.group_key));
-  const sumPositive = (ls) => ls.reduce((s, l) => s + Math.max(0, balances[l.id] || 0), 0);
-  const sumNegative = (ls) => ls.reduce((s, l) => s + Math.max(0, -(balances[l.id] || 0)), 0);
 
-  const receivableLedgers = byGroup(["sundry_debtors"]);
-  const payableLedgers = byGroup(["sundry_creditors"]);
-  const cashLedgers = byGroup(["cash_in_hand"]);
-  const bankLedgers = byGroup(["bank_accounts"]);
-  const stockLedgers = byGroup(["stock_in_hand"]);
 
-  const receivables = round2(sumPositive(receivableLedgers));
-  const payables = round2(sumPositive(payableLedgers));
-  const cashBalance = round2(cashLedgers.reduce((s, l) => s + (balances[l.id] || 0), 0));
-  const bankBalance = round2(bankLedgers.reduce((s, l) => s + (balances[l.id] || 0), 0));
-  const stockValue = round2(sumPositive(stockLedgers));
-
-  const monthly = useMemo(() => {
-    const byMonth = {};
-    for (const line of lines) {
-      const d = lineDates[line.voucher_id]; if (!d) continue;
-      const ledger = ledgers.find((l) => l.id === line.ledger_id); if (!ledger) continue;
-      const info = groupInfo(ledger.group_key);
-      const key = d.slice(0, 7);
-      byMonth[key] = byMonth[key] || { month: key, Income: 0, Expenses: 0 };
-      if (info.nature === "income") byMonth[key].Income += (Number(line.credit) || 0) - (Number(line.debit) || 0);
-      if (info.nature === "expense") byMonth[key].Expenses += (Number(line.debit) || 0) - (Number(line.credit) || 0);
-    }
-    return Object.values(byMonth).sort((a, b) => a.month.localeCompare(b.month)).slice(-6).map((m) => ({ ...m, Income: round2(m.Income), Expenses: round2(m.Expenses) }));
-  }, [lines, ledgers, lineDates]);
-
-  const expensePie = useMemo(() => {
-    const byLedger = {};
-    for (const line of lines) {
-      const ledger = ledgers.find((l) => l.id === line.ledger_id); if (!ledger) continue;
-      if (groupInfo(ledger.group_key).nature !== "expense") continue;
-      const net = (Number(line.debit) || 0) - (Number(line.credit) || 0);
-      byLedger[ledger.name] = (byLedger[ledger.name] || 0) + net;
-    }
-    return Object.entries(byLedger).filter(([, v]) => v > 0).map(([name, value]) => ({ name, value: round2(value) })).sort((a, b) => b.value - a.value).slice(0, 8);
-  }, [lines, ledgers]);
-
-  const PIE_COLORS = ["#111", "#555", "#888", "#aaa", "#c33", "#e88", "#39a", "#3a9"];
-
-  const openLedgerwise = (title, groupLedgers, sideFn) => {
-    const rows = groupLedgers.map((l) => ({ name: l.name, amount: round2(sideFn(l)) })).filter((r) => Math.abs(r.amount) > 0.5).sort((a, b) => b.amount - a.amount);
-    setDetail({ title, rows });
-  };
-
-  const cards = [
-    { label: "Receivables", value: receivables, onClick: () => openLedgerwise("Receivables, ledger-wise", receivableLedgers, (l) => Math.max(0, balances[l.id] || 0)) },
-    { label: "Payables", value: payables, onClick: () => openLedgerwise("Payables, ledger-wise", payableLedgers, (l) => Math.max(0, -(balances[l.id] || 0))) },
-    { label: "Cash Balance", value: cashBalance, onClick: () => openLedgerwise("Cash, ledger-wise", cashLedgers, (l) => balances[l.id] || 0) },
-    { label: "Bank Balance", value: bankBalance, onClick: () => openLedgerwise("Bank, ledger-wise", bankLedgers, (l) => balances[l.id] || 0) },
-    { label: "Inventory Register", value: stockValue, onClick: () => openLedgerwise("Inventory, ledger-wise", stockLedgers, (l) => Math.max(0, balances[l.id] || 0)) },
-    { label: "Cash Flow (Cash+Bank)", value: round2(cashBalance + bankBalance), onClick: () => openLedgerwise("Cash Flow, ledger-wise", [...cashLedgers, ...bankLedgers], (l) => balances[l.id] || 0) },
-  ];
-
-  if (detail) {
-    return (
-      <div>
-        <BackHeader title={detail.title} onBack={() => setDetail(null)} />
-        <div className="space-y-1.5">
-          {detail.rows.length === 0 && <p className="text-sm text-gray-400">Nothing to show.</p>}
-          {detail.rows.map((r) => (
-            <div key={r.name} className="flex justify-between bg-gray-50 rounded px-4 py-2.5 text-sm"><span>{r.name}</span><b className="tabnum">{inr(r.amount)}</b></div>
-          ))}
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div>
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-8">
-        {cards.map((c) => (
-          <button key={c.label} onClick={c.onClick} className="text-left bg-white rounded-lg p-4 border border-gray-200 hover:border-black transition-colors">
-            <div className="text-[11px] text-gray-500 mb-1.5">{c.label}</div>
-            <div className="font-display text-2xl tabnum">{inr(c.value)}</div>
-          </button>
-        ))}
-      </div>
-      <div className="grid md:grid-cols-2 gap-6">
-        <div>
-          <h3 className="font-display text-base mb-3">Monthly Income vs Expenses</h3>
-          {monthly.length === 0 ? <p className="text-sm text-gray-400">No transactions recorded yet.</p> : (
-            <div className="h-64">
-              <AccBarChart data={monthly} />
-            </div>
-          )}
-        </div>
-        <div>
-          <h3 className="font-display text-base mb-3">Expenses by Ledger</h3>
-          {expensePie.length === 0 ? <p className="text-sm text-gray-400">No expenses recorded yet.</p> : (
-            <div className="h-64">
-              <AccPieChart data={expensePie} colors={PIE_COLORS} />
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function AccBarChart({ data }) {
-  return (
-    <ResponsiveContainer width="100%" height="100%">
-      <BarChart data={data}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
-        <XAxis dataKey="month" tick={{ fontSize: 11 }} />
-        <YAxis tick={{ fontSize: 11 }} />
-        <Tooltip formatter={(v) => inr(v)} />
-        <Legend wrapperStyle={{ fontSize: 12 }} />
-        <Bar dataKey="Income" fill="#111111" radius={[3, 3, 0, 0]} />
-        <Bar dataKey="Expenses" fill="#aaaaaa" radius={[3, 3, 0, 0]} />
-      </BarChart>
-    </ResponsiveContainer>
-  );
-}
-function AccPieChart({ data, colors }) {
-  return (
-    <ResponsiveContainer width="100%" height="100%">
-      <PieChart>
-        <Pie data={data} dataKey="value" nameKey="name" outerRadius={85} label={(d) => d.name}>
-          {data.map((_, i) => <Cell key={i} fill={colors[i % colors.length]} />)}
-        </Pie>
-        <Tooltip formatter={(v) => inr(v)} />
-      </PieChart>
-    </ResponsiveContainer>
-  );
-}
 
 /* ============ Ledgers ============ */
-function emptyLedger(kind) {
-  return { id: null, kind, name: "", group_key: kind === "customer" ? "sundry_debtors" : kind === "vendor" ? "sundry_creditors" : "current_assets",
-    opening_balance: 0, opening_side: "Dr", contact_person: "", mobile: "", email: "", gst_type: "unregistered", gstin: "", pan: "",
-    msme: "", other_registrations: "", office_no: "", building_name: "", street_name: "", city: "", state: "", country: "India", pin_code: "",
-    bank_details: { bank_name: "", account_number: "", ifsc: "" } };
-}
+
 
 
 function LedgersScreen({ ledgers, items, vouchers = [], lines = [], business, businessId, reload, showToast, onOpenLightbox }) {
@@ -634,68 +513,7 @@ function LedgerList({ rows, onAdd, onEdit, onDelete, onView, empty, showGroup })
   );
 }
 
-function LedgerForm({ existing, onCancel, onSave }) {
-  const [l, setL] = useState(existing);
-  const set = (k, v) => setL((p) => ({ ...p, [k]: v }));
-  const isParty = l.kind === "customer" || l.kind === "vendor";
-  return (
-    <div className="max-w-lg">
-      <BackHeader title={existing.id ? "Edit ledger" : `New ${l.kind}`} onBack={onCancel} />
-      <div className="bg-white border border-gray-200 rounded-lg p-5 space-y-4">
-        <Field label="Name / Company name *"><input className={inputCls} value={l.name} onChange={(e) => set("name", e.target.value)} /></Field>
-        {!isParty && (
-          <Field label="Group">
-            <select className={inputCls} value={l.group_key} onChange={(e) => set("group_key", e.target.value)}>
-              {LEDGER_GROUPS.filter((g) => !["sundry_debtors", "sundry_creditors"].includes(g.key)).map((g) => <option key={g.key} value={g.key}>{g.name}</option>)}
-            </select>
-          </Field>
-        )}
-        {isParty && (
-          <>
-            <Field label="Contact person name"><input className={inputCls} value={l.contact_person} onChange={(e) => set("contact_person", e.target.value)} /></Field>
-            <Field label="Mobile (required, must be unique in this business)"><input className={inputCls} value={l.mobile} onChange={(e) => set("mobile", e.target.value)} /></Field>
-            <Field label="Email"><input className={inputCls} value={l.email} onChange={(e) => set("email", e.target.value)} /></Field>
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="GSTN status">
-                <select className={inputCls} value={l.gst_type} onChange={(e) => set("gst_type", e.target.value)}>
-                  <option value="unregistered">Unregistered</option><option value="registered">Registered</option><option value="consumer">Consumer</option>
-                </select>
-              </Field>
-              <Field label="GSTIN"><input className={inputCls} value={l.gstin} onChange={(e) => set("gstin", e.target.value.toUpperCase())} /></Field>
-            </div>
-            <Field label="PAN"><input className={inputCls} value={l.pan} onChange={(e) => set("pan", e.target.value.toUpperCase())} /></Field>
-            {l.kind === "vendor" && (
-              <>
-                <Field label="MSME / other registrations"><input className={inputCls} value={l.msme} onChange={(e) => set("msme", e.target.value)} /></Field>
-                <div className="grid grid-cols-3 gap-2">
-                  <input placeholder="Bank name" className={inputCls} value={l.bank_details?.bank_name || ""} onChange={(e) => set("bank_details", { ...l.bank_details, bank_name: e.target.value })} />
-                  <input placeholder="Account no." className={inputCls} value={l.bank_details?.account_number || ""} onChange={(e) => set("bank_details", { ...l.bank_details, account_number: e.target.value })} />
-                  <input placeholder="IFSC" className={inputCls} value={l.bank_details?.ifsc || ""} onChange={(e) => set("bank_details", { ...l.bank_details, ifsc: e.target.value })} />
-                </div>
-              </>
-            )}
-            <div className="pt-2 border-t border-gray-200">
-              <p className="text-xs font-medium text-gray-500 mb-2">Address</p>
-              <div className="grid grid-cols-2 gap-2">
-                <input placeholder="Office/Flat No." className={inputCls} value={l.office_no} onChange={(e) => set("office_no", e.target.value)} />
-                <input placeholder="Building" className={inputCls} value={l.building_name} onChange={(e) => set("building_name", e.target.value)} />
-                <input placeholder="Street" className={inputCls} value={l.street_name} onChange={(e) => set("street_name", e.target.value)} />
-                <input placeholder="City" className={inputCls} value={l.city} onChange={(e) => set("city", e.target.value)} />
-                <input placeholder="State" className={inputCls} value={l.state} onChange={(e) => set("state", e.target.value)} />
-                <input placeholder="Pin code" className={inputCls} value={l.pin_code} onChange={(e) => set("pin_code", e.target.value)} />
-              </div>
-            </div>
-          </>
-        )}
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Opening balance"><input type="number" className={inputCls} value={l.opening_balance} onChange={(e) => set("opening_balance", parseFloat(e.target.value) || 0)} /></Field>
-          <Field label="Side"><select className={inputCls} value={l.opening_side} onChange={(e) => set("opening_side", e.target.value)}><option value="Dr">Dr</option><option value="Cr">Cr</option></select></Field>
-        </div>
-        <button onClick={() => onSave(l)} disabled={!l.name.trim() || (isParty && !l.mobile.trim())} className="w-full bg-black disabled:opacity-40 text-white rounded py-2.5 text-sm font-medium">Save</button>
-      </div>
-    </div>
-  );
-}
+
 
 
 
@@ -773,19 +591,56 @@ function VoucherListScreen({ title, vouchers, ledgers, onOpenNew, newLabel, extr
   );
 }
 
-function SalesScreen({ businessId, ledgers, items, vouchers, lines, allocations, business, reload, showToast, onOpenLightbox, goSettings }) {
+/** Invoices marked "repeat": shows what is due and creates the copies when asked. */
+function RecurringTab({ templates, ledgers, businessId, settings, reload, showToast, onOpen }) {
+  const [busy, setBusy] = useState(false);
+  const today = todayISO();
+  const nameOf = (id) => ledgers.find((l) => l.id === id)?.name || "—";
+  const dueCount = templates.reduce((n, t) => n + dueRecurringDates(t.meta.recurring, today).dates.length, 0);
+  const FREQ = { weekly: "every week", monthly: "every month", quarterly: "every 3 months", yearly: "every year" };
+  const run = async () => {
+    setBusy(true);
+    try { const r = await generateDueRecurring({ templates, ledgers, businessId, settings, today }); await reload(); showToast(r.errors.length ? `Created ${r.created}. Problem: ${r.errors[0]}` : `${r.created} invoice${r.created === 1 ? "" : "s"} created`); }
+    catch (e) { showToast(e.message); } finally { setBusy(false); }
+  };
+  const stop = async (t) => {
+    if (!window.confirm(`Stop repeating ${t.voucher_no}? Invoices already created stay as they are.`)) return;
+    try { await api.updateVoucherMeta(t.id, { ...t.meta, recurring: { ...t.meta.recurring, active: false } }); await reload(); } catch (e) { showToast(e.message); }
+  };
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-2 flex-wrap mb-3">
+        <p className="text-sm text-gray-500">{templates.length === 0 ? "No repeating invoices. Tick “Repeat this invoice automatically” on a tax invoice to set one up." : dueCount ? `${dueCount} invoice${dueCount === 1 ? " is" : "s are"} due to be created.` : "Nothing is due right now."}</p>
+        {templates.length > 0 && <button disabled={busy || !dueCount} onClick={run} className="bg-black text-white rounded px-3.5 py-2 text-sm font-medium disabled:opacity-40">{busy ? "Creating…" : "Create due invoices now"}</button>}
+      </div>
+      {templates.length > 0 && (
+        <table className="w-full text-sm" aria-label="Repeating invoices"><thead><tr className="text-left text-xs text-gray-400 border-b border-gray-200"><th className="py-2 pr-2">Invoice</th><th className="py-2 pr-2">Customer</th><th className="py-2 pr-2">Repeats</th><th className="py-2 pr-2">Next on</th><th className="py-2 pr-2 text-right">Amount</th><th /></tr></thead>
+          <tbody>{templates.map((t) => { const r = t.meta.recurring; const due = dueRecurringDates(r, today).dates.length; return (
+            <tr key={t.id} className="border-b border-gray-100 hover:bg-gray-50 cursor-pointer" onClick={() => onOpen(t)}>
+              <td className="py-2.5 pr-2">{t.voucher_no}</td><td className="py-2.5 pr-2">{nameOf(t.party_ledger_id)}</td><td className="py-2.5 pr-2">{FREQ[r.frequency]}{r.end ? ` until ${r.end.split("-").reverse().join("-")}` : ""}</td>
+              <td className="py-2.5 pr-2 whitespace-nowrap">{r.next.split("-").reverse().join("-")}{due > 0 && <span className="ml-2 text-[10px] bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded-full">{due} due</span>}</td>
+              <td className="py-2.5 pr-2 text-right tabnum">{inr(t.total)}</td><td className="py-2.5 text-right" onClick={(e) => e.stopPropagation()}><button aria-label={`Stop repeating ${t.voucher_no}`} onClick={() => stop(t)} className="text-xs text-gray-500 underline">Stop</button></td>
+            </tr>); })}</tbody></table>
+      )}
+    </div>
+  );
+}
+
+function SalesScreen({ businessId, ledgers, items, vouchers, lines, allocations, business, reload, showToast, onOpenLightbox, goSettings, pendingOpen, clearPending }) {
   const [mode, setMode] = useState("list");
   const [tab, setTab] = useState("invoices"); // invoices | proforma  (kept apart: a proforma is not a sale)
   const [cfg, setCfg] = useState(null);
   const [busyId, setBusyId] = useState(null);
-  const isPf = tab === "proforma";
-  const shown = vouchers.filter((v) => v.vtype === (isPf ? "proforma_invoice" : "sales_invoice"));
+  const isPf = tab === "proforma", isCn = tab === "credit", isRec = tab === "recurring";
+  const TAB_TYPE = { invoices: "sales_invoice", proforma: "proforma_invoice", credit: "credit_note" };
+  const shown = isRec ? vouchers.filter((v) => v.vtype === "sales_invoice" && v.meta?.recurring?.active) : vouchers.filter((v) => v.vtype === TAB_TYPE[tab]);
   const nameOf = (id) => ledgers.find((l) => l.id === id)?.name || "—";
   const metaOf = (v) => v.meta || {};
   const convertedInv = (v) => (metaOf(v).converted_to ? vouchers.find((x) => x.id === metaOf(v).converted_to) : null);
   const statusOf = (v) => {
     const m = metaOf(v);
     if (m.status === "draft") return { label: "Draft", cls: "bg-gray-100 text-gray-600" };
+    if (v.vtype === "credit_note") return { label: "Credit note", cls: "bg-purple-50 text-purple-700" };
     if (v.vtype === "proforma_invoice") { const c = convertedInv(v); return c ? { label: `Converted to ${c.voucher_no}`, cls: "bg-green-50 text-green-700" } : { label: "Open", cls: "bg-blue-50 text-blue-700" }; }
     const paid = allocations.filter((a) => a.invoice_voucher_id === v.id).reduce((s, a) => s + Number(a.amount), 0);
     if (paid >= v.total - 0.5) return { label: "Paid", cls: "bg-green-50 text-green-700" };
@@ -801,6 +656,12 @@ function SalesScreen({ businessId, ledgers, items, vouchers, lines, allocations,
     try { await api.deleteVoucher(v.id); await reload(); showToast("Deleted"); } catch (e) { showToast(e.message); }
   };
   const done = async () => { await reload(); setMode("list"); setCfg(null); };
+  useEffect(() => {
+    if (!pendingOpen) return;
+    const v = vouchers.find((x) => x.id === pendingOpen && ["sales_invoice", "proforma_invoice"].includes(x.vtype));
+    if (v) { if (v.vtype === "proforma_invoice") setTab("proforma"); openExisting(v); }
+    clearPending && clearPending();
+  }, [pendingOpen]);
 
   if (mode === "form") return <InvoiceForm key={cfg.initial?.voucher?.id || "new" + cfg.vtype + (cfg.convertFrom?.id || "")} businessId={businessId} ledgers={ledgers} items={items} vtype={cfg.vtype} business={business} initial={cfg.initial} convertFrom={cfg.convertFrom} vouchers={vouchers} allocations={allocations} lines={lines} reload={reload} goSettings={goSettings} onCancel={() => { setMode("list"); setCfg(null); }} onSaved={done} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
   if (mode === "otherIncome") return <OtherIncomeForm businessId={businessId} ledgers={ledgers} business={business} reload={reload} onCancel={() => setMode("list")} onSaved={done} showToast={showToast} />;
@@ -811,15 +672,17 @@ function SalesScreen({ businessId, ledgers, items, vouchers, lines, allocations,
         <h2 className="font-display text-xl">Sales</h2>
         <div className="flex gap-2">
           <button onClick={() => setMode("otherIncome")} className="border border-gray-300 rounded px-3 py-2 text-sm">Other Income</button>
-          <button onClick={() => openNew(isPf ? "proforma_invoice" : "sales_invoice")} className="bg-black text-white rounded px-3.5 py-2 text-sm font-medium flex items-center gap-1.5"><Plus size={15} /> {isPf ? "New Proforma" : "New Invoice"}</button>
+          <button onClick={() => openNew(isPf ? "proforma_invoice" : isCn ? "credit_note" : "sales_invoice")} className="bg-black text-white rounded px-3.5 py-2 text-sm font-medium flex items-center gap-1.5"><Plus size={15} /> {isPf ? "New Proforma" : isCn ? "New Credit Note" : "New Invoice"}</button>
         </div>
       </div>
       <div className="flex gap-4 border-b border-gray-200 mb-3 text-sm">
         <button onClick={() => setTab("invoices")} className={`pb-2 ${!isPf ? "font-semibold border-b-2 border-black" : "text-gray-400"}`}>Tax Invoices</button>
         <button onClick={() => setTab("proforma")} className={`pb-2 ${isPf ? "font-semibold border-b-2 border-black" : "text-gray-400"}`}>Proforma Invoices</button>
+        <button onClick={() => setTab("credit")} className={`pb-2 ${isCn ? "font-semibold border-b-2 border-black" : "text-gray-400"}`}>Credit Notes</button>
+        <button onClick={() => setTab("recurring")} className={`pb-2 ${isRec ? "font-semibold border-b-2 border-black" : "text-gray-400"}`}>Recurring</button>
       </div>
       {isPf && <p className="text-xs text-gray-500 mb-3">Proforma invoices are quotations only. They are kept apart from sales and never touch your accounts, GST or reports until converted to a Tax Invoice.</p>}
-      {shown.length === 0 ? <p className="text-sm text-gray-400 text-center py-10">{isPf ? "No proforma invoices yet." : "No invoices yet."}</p> : (
+      {isRec ? <RecurringTab templates={shown} ledgers={ledgers} businessId={businessId} settings={business?.settings || {}} reload={reload} showToast={showToast} onOpen={openExisting} /> : shown.length === 0 ? <p className="text-sm text-gray-400 text-center py-10">{isPf ? "No proforma invoices yet." : isCn ? "No credit notes yet. Use one when goods are returned or a bill is reduced." : "No invoices yet."}</p> : (
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead><tr className="text-left text-xs text-gray-400 border-b border-gray-200"><th className="py-2 pr-2">Date</th><th className="py-2 pr-2">No.</th><th className="py-2 pr-2">Customer</th><th className="py-2 pr-2">Status</th><th className="py-2 pr-2 text-right">Total</th><th className="py-2"></th></tr></thead>
@@ -921,11 +784,12 @@ function ReceiptPaymentForm({ businessId, ledgers, vouchers, allocations, busine
 }
 
 /* ============ Purchases: Purchase Invoice / Expense / Debit Note ============ */
-function PurchaseInvoiceForm({ businessId, ledgers, items, vtype, business, onCancel, onSaved, showToast, onOpenLightbox, reload }) {
+function ExpenseForm({ businessId, ledgers, vouchers, business, onCancel, onSaved, showToast, onOpenLightbox, reload }) {
   const sys = sysLedgerMap(ledgers);
-  const vendors = ledgers.filter((l) => l.kind === "vendor").map((l) => ({ id: l.id, label: l.name, sublabel: l.mobile }));
-  const parties = ledgers.map((l) => ({ id: l.id, label: l.name, sublabel: l.kind }));
   const [partyId, setPartyId] = useState("");
+  const [ledgerId, setLedgerId] = useState("");
+  const [paidFrom, setPaidFrom] = useState("");
+  const [dismissed, setDismissed] = useState(false);
   const [vdate, setVdate] = useState(todayISO());
   const [voucherNo, setVoucherNo] = useState("");
   const [amount, setAmount] = useState("");
@@ -933,43 +797,62 @@ function PurchaseInvoiceForm({ businessId, ledgers, items, vtype, business, onCa
   const [supplyType, setSupplyType] = useState("intra");
   const [narration, setNarration] = useState("");
   const [photo, setPhoto] = useState("");
-  const isExpense = vtype === "expense";
-  useEffect(() => { api.nextVoucherNumber(businessId, vtype, vtype === "purchase_invoice" ? "PUR-" : isExpense ? "EXP-" : "DN-", business?.settings?.numbering?.[vtype], vdate).then(setVoucherNo).catch(() => {}); }, [businessId, vtype, vdate]);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { api.nextVoucherNumber(businessId, "expense", "EXP-", business?.settings?.numbering?.expense, vdate).then(setVoucherNo).catch(() => {}); }, [businessId, vdate]);
   const totals = useMemo(() => computeInvoiceTotals([{ qty: 1, rate: parseFloat(amount) || 0, gstRate }], { supplyType }), [amount, gstRate, supplyType]);
+  const payFrom = ledgers.filter((l) => ["cash_in_hand", "bank_accounts"].includes(l.group_key));
+  // what this vendor / description was booked to before
+  const history = useMemo(() => vouchers.filter((v) => v.vtype === "expense" && v.main_ledger_id && v.main_ledger_id !== sys.purchases).map((v) => ({ partyId: v.party_ledger_id, description: v.narration || "", ledgerId: v.main_ledger_id })), [vouchers, sys.purchases]);
+  const suggestion = useMemo(() => suggestExpenseLedger({ history, partyId, description: narration }), [history, partyId, narration]);
+  const sugLedger = suggestion ? ledgers.find((l) => l.id === suggestion.ledgerId) : null;
   const save = async () => {
-    if (!partyId || !amount) { showToast("Select a ledger and an amount."); return; }
+    if (!ledgerId) { showToast("Choose the expense (for example Rent or Electricity)."); return; }
+    if (!partyId && !paidFrom) { showToast("Choose who this is payable to, or whether it was paid from Cash or Bank."); return; }
+    if (!(parseFloat(amount) > 0)) { showToast("Enter the amount."); return; }
+    setSaving(true);
     try {
-      const voucher = { business_id: businessId, vtype, voucher_no: voucherNo, vdate, party_ledger_id: partyId, main_ledger_id: sys.purchases,
-        narration, supply_type: supplyType, subtotal: totals.subtotal, cgst: totals.cgst, sgst: totals.sgst, igst: totals.igst, round_off: totals.roundOff, total: totals.total, attachment: photo };
-      const lines = buildPurchaseInvoiceLines({ partyLedgerId: partyId, purchaseLedgerId: sys.purchases, gstLedgers: sys, invoiceTotals: totals });
+      const credit = paidFrom || partyId;
+      const voucher = { business_id: businessId, vtype: "expense", voucher_no: voucherNo, vdate, party_ledger_id: partyId || null, main_ledger_id: ledgerId,
+        narration, supply_type: supplyType, subtotal: totals.subtotal, cgst: totals.cgst, sgst: totals.sgst, igst: totals.igst, round_off: totals.roundOff, total: totals.total, attachment: photo,
+        meta: { paid_from: paidFrom || null, ...(suggestion ? { ai: { suggested_ledger_id: suggestion.ledgerId, confidence: suggestion.confidence, decision: suggestion.ledgerId === ledgerId ? "accepted" : "changed" } } : {}) } };
+      const lines = buildPurchaseInvoiceLines({ partyLedgerId: credit, purchaseLedgerId: ledgerId, gstLedgers: sys, invoiceTotals: totals });
       await api.saveVoucher(voucher, [], lines);
       showToast("Saved"); onSaved();
-    } catch (e) { showToast(e.message); }
+    } catch (e) { showToast(e.message); } finally { setSaving(false); }
   };
   return (
     <div className="max-w-lg">
-      <BackHeader title={vtype === "purchase_invoice" ? "New Purchase Invoice" : isExpense ? "New Expense" : "New Debit Note"} onBack={onCancel} />
+      <BackHeader title="New Expense" onBack={onCancel} />
       <div className="bg-white border border-gray-200 rounded-lg p-5 space-y-4">
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Date"><input type="date" className={inputCls} value={vdate} onChange={(e) => setVdate(e.target.value)} /></Field>
-          <Field label="Journal Entry No."><input className={inputCls} value={voucherNo} onChange={(e) => setVoucherNo(e.target.value)} /></Field>
+          <Field label="Date"><input type="date" aria-label="Expense date" className={inputCls} value={vdate} onChange={(e) => setVdate(e.target.value)} /></Field>
+          <Field label="Expense no."><input aria-label="Expense number" className={inputCls} value={voucherNo} onChange={(e) => setVoucherNo(e.target.value)} /></Field>
         </div>
-        <Field label="Customer / Vendor / Ledger"><PartyPicker kind="vendor" allowAll={isExpense} ledgers={ledgers} value={partyId} onChange={setPartyId} businessId={businessId} reload={reload} showToast={showToast} /></Field>
+        <Field label="Customer / Vendor / Ledger (who it is payable to)"><PartyPicker kind="vendor" ledgers={ledgers} value={partyId} onChange={setPartyId} businessId={businessId} reload={reload} showToast={showToast} /></Field>
+        <Field label="Remarks / what it was for"><textarea aria-label="Expense remarks" rows={2} className={inputCls} value={narration} onChange={(e) => setNarration(e.target.value)} placeholder="e.g. Jio fiber bill for October" /></Field>
+        {suggestion && sugLedger && !ledgerId && !dismissed && (
+          <div className="bg-blue-50 border border-blue-100 rounded-lg p-3 text-sm" aria-label="Ledger suggestion">
+            <div>Suggested expense: <b>{sugLedger.name}</b> · {Math.round(suggestion.confidence * 100)}% ({confidenceLabel(suggestion.confidence)} confidence)</div>
+            <div className="text-[11px] text-gray-500">Based on {suggestion.basedOn} similar earlier entr{suggestion.basedOn === 1 ? "y" : "ies"}.</div>
+            <div className="flex gap-2 mt-2"><button onClick={() => setLedgerId(suggestion.ledgerId)} className="text-xs bg-black text-white rounded px-3 py-1.5">Accept</button><button onClick={() => setDismissed(true)} className="text-xs border border-gray-300 bg-white rounded px-3 py-1.5">Change</button></div>
+          </div>
+        )}
+        <Field label="Expense *"><ExpenseLedgerPicker ledgers={ledgers} value={ledgerId} onChange={setLedgerId} businessId={businessId} reload={reload} showToast={showToast} /></Field>
         <div className="grid grid-cols-3 gap-3">
-          <Field label="Amount"><input type="number" className={inputCls} value={amount} onChange={(e) => setAmount(e.target.value)} /></Field>
-          <Field label="GST %"><input type="number" className={inputCls} value={gstRate} onChange={(e) => setGstRate(parseFloat(e.target.value) || 0)} /></Field>
-          <Field label="Supply"><select className={inputCls} value={supplyType} onChange={(e) => setSupplyType(e.target.value)}><option value="intra">Intra</option><option value="inter">Inter</option></select></Field>
+          <Field label="Amount"><input type="number" aria-label="Expense amount" className={inputCls} value={amount} onChange={(e) => setAmount(e.target.value)} /></Field>
+          <Field label="GST %"><input type="number" aria-label="Expense GST rate" className={inputCls} value={gstRate} onChange={(e) => setGstRate(parseFloat(e.target.value) || 0)} /></Field>
+          <Field label="Supply"><select aria-label="Expense supply" className={inputCls} value={supplyType} onChange={(e) => setSupplyType(e.target.value)}><option value="intra">Intra</option><option value="inter">Inter</option></select></Field>
         </div>
         <p className="text-xs text-gray-400">Total incl. tax: <b>{inr(totals.total)}</b></p>
-        {isExpense && <PhotoPicker label="Upload or click purchase invoice photo" value={photo} onChange={setPhoto} />}
-        <Field label="Remarks"><textarea rows={2} className={inputCls} value={narration} onChange={(e) => setNarration(e.target.value)} /></Field>
-        <button onClick={save} className="w-full bg-black text-white rounded py-2.5 text-sm font-medium">Save</button>
+        <Field label="Paid"><select aria-label="Paid from" className={inputCls} value={paidFrom} onChange={(e) => setPaidFrom(e.target.value)}><option value="">On credit — to be paid later</option>{payFrom.map((l) => <option key={l.id} value={l.id}>Paid now from {l.name}</option>)}</select></Field>
+        <PhotoPicker label="Upload or click purchase invoice photo" value={photo} onChange={setPhoto} />
+        <button disabled={saving} onClick={save} className="w-full bg-black text-white rounded py-2.5 text-sm font-medium disabled:opacity-50">{saving ? "Saving…" : "Save"}</button>
       </div>
     </div>
   );
 }
 
-function PurchasesScreen({ businessId, ledgers, items, vouchers, lines, allocations, business, reload, showToast, onOpenLightbox, goSettings }) {
+function PurchasesScreen({ businessId, ledgers, items, vouchers, lines, allocations, business, reload, showToast, onOpenLightbox, goSettings, pendingOpen, clearPending }) {
   const [mode, setMode] = useState("list"); // list | bill | expense | debit
   const [cfg, setCfg] = useState(null);
   const [busyId, setBusyId] = useState(null);
@@ -977,6 +860,7 @@ function PurchasesScreen({ businessId, ledgers, items, vouchers, lines, allocati
   const nameOf = (id) => ledgers.find((l) => l.id === id)?.name || "—";
   const TYPE = { purchase_invoice: "Purchase invoice", expense: "Expense", debit_note: "Debit note" };
   const statusOf = (v) => {
+    if (v.vtype === "debit_note") return (v.meta || {}).status === "draft" ? { label: "Draft", cls: "bg-gray-100 text-gray-600" } : { label: "Debit note", cls: "bg-purple-50 text-purple-700" };
     if (v.vtype !== "purchase_invoice") return null;
     if ((v.meta || {}).status === "draft") return { label: "Draft", cls: "bg-gray-100 text-gray-600" };
     const paid = allocations.filter((a) => a.invoice_voucher_id === v.id).reduce((s, a) => s + Number(a.amount), 0);
@@ -984,10 +868,10 @@ function PurchasesScreen({ businessId, ledgers, items, vouchers, lines, allocati
     if (paid > 0) return { label: "Partly paid", cls: "bg-yellow-50 text-yellow-700" };
     return { label: "Unpaid", cls: "bg-red-50 text-red-700" };
   };
-  const openNew = () => { setCfg({ initial: null }); setMode("bill"); };
+  const openNew = (vtype = "purchase_invoice") => { setCfg({ initial: null, vtype }); setMode("bill"); };
   const openBill = async (v) => {
     setBusyId(v.id);
-    try { const [its, atts] = await Promise.all([api.fetchVoucherItems(v.id), api.fetchAttachments(v.id)]); setCfg({ initial: { voucher: v, items: its, attachments: atts } }); setMode("bill"); }
+    try { const [its, atts] = await Promise.all([api.fetchVoucherItems(v.id), api.fetchAttachments(v.id)]); setCfg({ vtype: v.vtype, initial: { voucher: v, items: its, attachments: atts } }); setMode("bill"); }
     catch (e) { showToast(e.message); } finally { setBusyId(null); }
   };
   const remove = async (v) => {
@@ -995,10 +879,15 @@ function PurchasesScreen({ businessId, ledgers, items, vouchers, lines, allocati
     try { await api.deleteVoucher(v.id); await reload(); showToast("Deleted"); } catch (e) { showToast(e.message); }
   };
   const done = async () => { await reload(); setMode("list"); setCfg(null); };
+  useEffect(() => {
+    if (!pendingOpen) return;
+    const v = vouchers.find((x) => x.id === pendingOpen && x.vtype === "purchase_invoice");
+    if (v) openBill(v);
+    clearPending && clearPending();
+  }, [pendingOpen]);
 
-  if (mode === "bill") return <InvoiceForm key={cfg.initial?.voucher?.id || "new-purchase"} businessId={businessId} ledgers={ledgers} items={items} vtype="purchase_invoice" business={business} initial={cfg.initial} convertFrom={null} vouchers={vouchers} allocations={allocations} lines={lines} reload={reload} goSettings={goSettings} onCancel={() => { setMode("list"); setCfg(null); }} onSaved={done} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
-  if (mode === "expense") return <PurchaseInvoiceForm businessId={businessId} ledgers={ledgers} items={items} vtype="expense" business={business} reload={reload} onCancel={() => setMode("list")} onSaved={done} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
-  if (mode === "debit") return <PurchaseInvoiceForm businessId={businessId} ledgers={ledgers} items={items} vtype="debit_note" business={business} reload={reload} onCancel={() => setMode("list")} onSaved={done} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
+  if (mode === "bill") return <InvoiceForm key={cfg.initial?.voucher?.id || `new-${cfg.vtype || "purchase_invoice"}`} businessId={businessId} ledgers={ledgers} items={items} vtype={cfg.vtype || "purchase_invoice"} business={business} initial={cfg.initial} convertFrom={null} vouchers={vouchers} allocations={allocations} lines={lines} reload={reload} goSettings={goSettings} onCancel={() => { setMode("list"); setCfg(null); }} onSaved={done} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
+  if (mode === "expense") return <ExpenseForm vouchers={vouchers} businessId={businessId} ledgers={ledgers} business={business} reload={reload} onCancel={() => setMode("list")} onSaved={done} showToast={showToast} onOpenLightbox={onOpenLightbox} />;
 
   return (
     <div>
@@ -1006,8 +895,8 @@ function PurchasesScreen({ businessId, ledgers, items, vouchers, lines, allocati
         <h2 className="font-display text-xl">Purchases</h2>
         <div className="flex gap-2">
           <button onClick={() => setMode("expense")} className="border border-gray-300 rounded px-3 py-2 text-sm">Expense</button>
-          <button onClick={() => setMode("debit")} className="border border-gray-300 rounded px-3 py-2 text-sm">Debit Note</button>
-          <button onClick={openNew} className="bg-black text-white rounded px-3.5 py-2 text-sm font-medium flex items-center gap-1.5"><Plus size={15} /> New Purchase Invoice</button>
+          <button onClick={() => openNew("debit_note")} className="border border-gray-300 rounded px-3 py-2 text-sm">Debit Note</button>
+          <button onClick={() => openNew()} className="bg-black text-white rounded px-3.5 py-2 text-sm font-medium flex items-center gap-1.5"><Plus size={15} /> New Purchase Invoice</button>
         </div>
       </div>
       {rows.length === 0 ? <p className="text-sm text-gray-400 text-center py-10">No purchases recorded yet.</p> : (
@@ -1015,7 +904,7 @@ function PurchasesScreen({ businessId, ledgers, items, vouchers, lines, allocati
           <table className="w-full text-sm">
             <thead><tr className="text-left text-xs text-gray-400 border-b border-gray-200"><th className="py-2 pr-2">Date</th><th className="py-2 pr-2">Voucher no.</th><th className="py-2 pr-2">Type</th><th className="py-2 pr-2">Vendor / ledger</th><th className="py-2 pr-2">Status</th><th className="py-2 pr-2 text-right">Total</th><th className="py-2"></th></tr></thead>
             <tbody>{rows.map((v) => {
-              const st = statusOf(v); const clickable = v.vtype === "purchase_invoice";
+              const st = statusOf(v); const clickable = ["purchase_invoice", "debit_note"].includes(v.vtype);
               return (
                 <tr key={v.id} className={`border-b border-gray-100 ${clickable ? "hover:bg-gray-50 cursor-pointer" : ""}`} onClick={() => clickable && openBill(v)}>
                   <td className="py-2.5 pr-2 whitespace-nowrap">{v.vdate}</td>
@@ -1036,7 +925,7 @@ function PurchasesScreen({ businessId, ledgers, items, vouchers, lines, allocati
 }
 
 /* ============ Reports ============ */
-function ReportsScreen({ ledgers, lines, vouchers, business }) {
+function ReportsScreen({ ledgers, lines, vouchers, allocations = [], business, onOpenVoucher }) {
   const [report, setReport] = useState("trial");
   const [asOf, setAsOf] = useState(todayISO());
   const lineDates = useMemo(() => Object.fromEntries(vouchers.map((v) => [v.id, v.vdate])), [vouchers]);
@@ -1049,12 +938,12 @@ function ReportsScreen({ ledgers, lines, vouchers, business }) {
   return (
     <div>
       <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
-        <div className="flex gap-4 text-sm">
-          {[["trial", "Trial Balance"], ["pl", "Profit & Loss"], ["bs", "Balance Sheet"]].map(([k, l]) => (
+        <div className="flex gap-x-4 gap-y-2 flex-wrap text-sm">
+          {[["trial", "Trial Balance"], ["pl", "Profit & Loss"], ["bs", "Balance Sheet"], ["sales", "Sales by salesperson"], ["gst", "GST"], ["recv", "Receivable ageing"], ["pay", "Payable ageing"], ["sreg", "Sales register"], ["preg", "Purchase register"]].map(([k, l]) => (
             <button key={k} onClick={() => setReport(k)} className={report === k ? "font-semibold border-b-2 border-black pb-1" : "text-gray-400 pb-1"}>{l}</button>
           ))}
         </div>
-        <input type="date" className={inputCls + " !w-auto"} value={asOf} onChange={(e) => setAsOf(e.target.value)} />
+        {["trial", "pl", "bs"].includes(report) && <input type="date" aria-label="As at date" className={inputCls + " !w-auto"} value={asOf} onChange={(e) => setAsOf(e.target.value)} />}
       </div>
 
       {report === "trial" && (
@@ -1083,7 +972,13 @@ function ReportsScreen({ ledgers, lines, vouchers, business }) {
           <p className={`text-xs mt-3 ${bs.balanced ? "text-green-600" : "text-red-600"}`}>{bs.balanced ? "✓ Balance Sheet balances" : "⚠ Does not balance — this should never happen; please report it."}</p>
         </div>
       )}
-      <p className="text-[11px] text-gray-400 mt-6">GST, TDS, and TCS detail reports are planned next — this release gives you the three core financial statements.</p>
+      {report === "gst" && <GstReport vouchers={vouchers} ledgers={ledgers} />}
+      {report === "recv" && <AgeingReport kind="receivable" vouchers={vouchers} allocations={allocations} ledgers={ledgers} lines={lines} />}
+      {report === "pay" && <AgeingReport kind="payable" vouchers={vouchers} allocations={allocations} ledgers={ledgers} lines={lines} />}
+      {report === "sreg" && <RegisterReport side="sales" vouchers={vouchers} ledgers={ledgers} />}
+      {report === "preg" && <RegisterReport side="purchase" vouchers={vouchers} ledgers={ledgers} />}
+      {report === "sales" && <SalesBySalesperson vouchers={vouchers} allocations={allocations} ledgers={ledgers} onOpenVoucher={onOpenVoucher} />}
+      <p className="text-[11px] text-gray-400 mt-6">TDS and TCS reports are not available yet.</p>
     </div>
   );
 }
