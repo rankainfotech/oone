@@ -1075,3 +1075,27 @@ export function dueRecurringDates(rec, todayISO, max = 12) {
   while (rec?.active && next && next <= todayISO && (!rec.end || next <= rec.end) && out.length < max) { out.push(next); next = nextRecurringDate(next, rec.frequency); }
   return { dates: out, next };
 }
+
+// ======================= backup =======================
+/** Everything in the business laid out as readable sheets (and a check that the books still balance). */
+export function buildBackupSheets({ business, ledgers, items, vouchers, lines, allocations, voucherItems = [], timesheets = [], bankRows = [], exportedAt }) {
+  const lName = Object.fromEntries(ledgers.map((l) => [l.id, l.name]));
+  const itemName = Object.fromEntries(items.map((i) => [i.id, i.name]));
+  const vById = Object.fromEntries(vouchers.map((v) => [v.id, v]));
+  const typeOf = (l) => (l.kind === "customer" ? "Customer" : l.kind === "vendor" ? "Vendor" : groupInfo(l.group_key).name);
+  const byDate = (a, b) => (a.vdate === b.vdate ? String(a.voucher_no).localeCompare(String(b.voucher_no)) : a.vdate < b.vdate ? -1 : 1);
+  const ordered = [...vouchers].sort(byDate);
+  const dr = round2(lines.reduce((s, l) => s + (Number(l.debit) || 0), 0)), cr = round2(lines.reduce((s, l) => s + (Number(l.credit) || 0), 0));
+  return {
+    About: [["OONE backup"], ["Business", business?.name || ""], ["GSTIN", business?.gstin || ""], ["Exported on", exportedAt || ""], [],
+      ["Ledgers", ledgers.length], ["Products", items.length], ["Vouchers", vouchers.length], ["Accounting entries", lines.length], ["Total debits", dr], ["Total credits", cr], ["Books balanced", Math.abs(dr - cr) < 0.005 ? "Yes" : "NO — please tell support"]],
+    Ledgers: [["Name", "Type", "Group", "Mobile", "Email", "GSTIN", "PAN", "State", "City", "Opening balance", "Dr/Cr"], ...ledgers.map((l) => [l.name, typeOf(l), groupInfo(l.group_key).name, l.mobile || "", l.email || "", l.gstin || "", l.pan || "", l.state || "", l.city || "", Number(l.opening_balance) || 0, l.opening_side || ""])],
+    Products: [["Name", "Code", "HSN/SAC", "Sale rate", "Purchase rate", "GST %", "Unit", "Group", "Opening qty", "Opening amount"], ...items.map((i) => [i.name, i.item_code || "", i.hsn_sac || "", Number(i.sale_rate) || 0, Number(i.purchase_rate) || 0, Number(i.gst_rate) || 0, i.unit || "", i.group_name || "", Number(i.opening_qty) || 0, Number(i.opening_amount) || 0])],
+    Vouchers: [["Date", "Type", "No.", "Party", "Taxable", "CGST", "SGST", "IGST", "Round off", "Total", "Status", "Reference", "Narration"], ...ordered.map((v) => [v.vdate, VOUCHER_LABELS[v.vtype] || v.vtype, v.voucher_no, lName[v.party_ledger_id] || "", Number(v.subtotal) || 0, Number(v.cgst) || 0, Number(v.sgst) || 0, Number(v.igst) || 0, Number(v.round_off) || 0, Number(v.total) || 0, v.meta?.status === "draft" ? "Draft" : "Final", v.reference || "", v.narration || ""])],
+    Entries: [["Date", "Voucher type", "Voucher no.", "Ledger", "Debit", "Credit", "Narration"], ...lines.filter((l) => vById[l.voucher_id]).map((l) => ({ l, v: vById[l.voucher_id] })).sort((a, b) => byDate(a.v, b.v)).map(({ l, v }) => [v.vdate, VOUCHER_LABELS[v.vtype] || v.vtype, v.voucher_no, lName[l.ledger_id] || "", Number(l.debit) || 0, Number(l.credit) || 0, l.narration || ""])],
+    "Bill items": [["Voucher no.", "Date", "Item", "HSN/SAC", "Qty", "Rate", "GST %", "Amount"], ...voucherItems.filter((x) => vById[x.voucher_id]).map((x) => [vById[x.voucher_id].voucher_no, vById[x.voucher_id].vdate, itemName[x.item_id] || x.description || "", x.hsn_sac || "", Number(x.qty) || 0, Number(x.rate) || 0, Number(x.gst_rate) || 0, Number(x.amount) || 0])],
+    Settlements: [["Bill no.", "Settled by", "Amount"], ...allocations.map((a) => [vById[a.invoice_voucher_id]?.voucher_no || "", vById[a.source_voucher_id]?.voucher_no || "", Number(a.amount) || 0])],
+    Timesheets: [["Date", "Project", "Task", "Person", "Hours", "Billable", "Customer", "Notes"], ...timesheets.map((t) => [t.tdate, t.project || "", t.task || "", t.user_name || "", Number(t.hours) || 0, t.billable ? "Yes" : "No", lName[t.customer_ledger_id] || "", t.notes || ""])],
+    "Bank statement rows": [["Date", "Bank", "Description", "Reference", "Debit", "Credit", "Status"], ...bankRows.map((r) => [r.txn_date, lName[r.bank_ledger_id] || "", r.description || "", r.reference || "", Number(r.debit) || 0, Number(r.credit) || 0, r.status])],
+  };
+}
