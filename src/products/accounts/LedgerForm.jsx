@@ -1,287 +1,99 @@
-import { supabase } from "../../supabaseClient";
-import { toDbLines, nextVoucherNo, normalizeNumbering, friendlyDbError } from "./calc";
+import React, { useState } from "react";
+import { inputCls, Field, BackHeader } from "../../shared";
+import { LEDGER_GROUPS, INDIAN_STATES, validateGstin } from "./calc";
 
-// Supabase/Postgres rejects an explicit `id: null` on insert (violates the
-// not-null id column even though a default exists) and rejects empty strings
-// "" in numeric columns. This strips both problems from a row before sending.
-function cleanRow(row, numericKeys = []) {
-  const { id, ...rest } = row;
-  const cleaned = { ...rest };
-  for (const k of numericKeys) {
-    if (cleaned[k] === "" || cleaned[k] === undefined) cleaned[k] = null;
-  }
-  return { id: id || null, cleaned };
+/** A small note under a GSTIN box: valid (with the state it names) or what looks wrong. */
+export function GstinHint({ value }) {
+  const r = validateGstin(value);
+  if (!String(value || "").trim() || r.empty) return null;
+  return r.valid ? <p className="text-[11px] text-green-700 mt-1" aria-label="GSTIN check">✓ Valid GSTIN · {r.state}</p> : <p className="text-[11px] text-amber-700 mt-1" aria-label="GSTIN check">Check this GSTIN: {r.reason}</p>;
 }
 
-// The database returns at most 1,000 rows per request, so anything that can grow is read page by page.
-// (Reading only the first 1,000 would silently drop entries and give wrong balances.)
-export async function fetchAllPages(makeQuery, pageSize = 1000) {
-  const out = [];
-  for (let from = 0; ; from += pageSize) {
-    const { data, error } = await makeQuery().range(from, from + pageSize - 1);
-    if (error) throw error;
-    out.push(...(data || []));
-    if (!data || data.length < pageSize) break;
-  }
-  return out;
+export function emptyLedger(kind) {
+  return { id: null, kind, name: "", group_key: kind === "customer" ? "sundry_debtors" : kind === "vendor" ? "sundry_creditors" : "current_assets",
+    opening_balance: 0, opening_side: "Dr", contact_person: "", mobile: "", email: "", gst_type: "unregistered", gstin: "", pan: "",
+    msme: "", other_registrations: "", office_no: "", building_name: "", street_name: "", city: "", state: "", country: "India", pin_code: "",
+    bank_details: { bank_name: "", account_number: "", ifsc: "" } };
 }
 
-// ---------------- Businesses ----------------
-export async function fetchBusinesses() {
-  const { data, error } = await supabase.from("acc_businesses").select("*").order("created_at");
-  if (error) throw error;
-  return data;
-}
-export async function createBusiness(fields) {
-  const { data, error } = await supabase.rpc("acc_create_business", { p: fields });
-  if (error) throw error;
-  return data;
-}
-export async function updateBusiness(id, fields) {
-  const { error } = await supabase.from("acc_businesses").update(fields).eq("id", id);
-  if (error) throw error;
-}
-
-// ---------------- Entitlement ----------------
-export async function fetchAccountsEntitlement(tenantId) {
-  const { data, error } = await supabase.from("organization_products").select("*").eq("tenant_id", tenantId).eq("product_key", "accounts").maybeSingle();
-  if (error) throw error;
-  return data;
-}
-export async function startAccountsTrial(tenantId) {
-  const { error } = await supabase.from("organization_products").insert({ tenant_id: tenantId, product_key: "accounts", status: "trial", max_businesses: 1 });
-  if (error) throw error;
-}
-
-// ---------------- Ledgers ----------------
-export async function fetchLedgers(businessId) {
-  return fetchAllPages(() => supabase.from("acc_ledgers").select("*").eq("business_id", businessId).order("name").order("id"));
-}
-export async function saveLedger(row) {
-  const { id, cleaned } = cleanRow(row, ["opening_balance"]);
-  if (id) { const { error } = await supabase.from("acc_ledgers").update(cleaned).eq("id", id); if (error) throw error; return id; }
-  const { data, error } = await supabase.from("acc_ledgers").insert(cleaned).select().single();
-  if (error) throw error;
-  return data.id;
-}
-export async function deleteLedgerSafely(id) {
-  const { data: lines } = await supabase.from("acc_voucher_lines").select("id").eq("ledger_id", id).limit(1);
-  if (lines && lines.length > 0) return { blocked: true };
-  const { error } = await supabase.from("acc_ledgers").delete().eq("id", id);
-  if (error) throw error;
-  return { blocked: false };
-}
-
-// ---------------- Items ----------------
-export async function fetchItems(businessId) {
-  return fetchAllPages(() => supabase.from("acc_items").select("*").eq("business_id", businessId).order("name").order("id"));
-}
-const ITEM_NUMERIC_KEYS = ["gst_rate", "other_tax_rate", "opening_qty", "opening_amount", "sale_rate", "purchase_rate"];
-export async function saveItem(row) {
-  const { id, cleaned } = cleanRow(row, ITEM_NUMERIC_KEYS);
-  if (id) { const { error } = await supabase.from("acc_items").update(cleaned).eq("id", id); if (error) throw error; return id; }
-  const { data, error } = await supabase.from("acc_items").insert(cleaned).select().single();
-  if (error) throw error;
-  return data.id;
-}
-export async function deleteItemSafely(id) {
-  const { data: lines } = await supabase.from("acc_voucher_items").select("id").eq("item_id", id).limit(1);
-  if (lines && lines.length > 0) return { blocked: true };
-  const { error } = await supabase.from("acc_items").delete().eq("id", id);
-  if (error) throw error;
-  return { blocked: false };
+/** Every field of a customer / vendor / other ledger. `set(key, value)` updates one field. */
+export function LedgerFormBody({ l, set }) {
+  const isParty = l.kind === "customer" || l.kind === "vendor";
+  const states = l.state && !INDIAN_STATES.includes(l.state) ? [l.state, ...INDIAN_STATES] : INDIAN_STATES;
+  return (
+    <div className="space-y-4">
+      <Field label="Name / Company name *"><input aria-label="Name" className={inputCls} value={l.name} onChange={(e) => set("name", e.target.value)} /></Field>
+      {!isParty && (
+        <Field label="Group">
+          <select aria-label="Ledger group" className={inputCls} value={l.group_key} onChange={(e) => set("group_key", e.target.value)}>
+            {LEDGER_GROUPS.filter((g) => !["sundry_debtors", "sundry_creditors"].includes(g.key)).map((g) => <option key={g.key} value={g.key}>{g.name}</option>)}
+          </select>
+        </Field>
+      )}
+      {isParty && (
+        <>
+          <Field label="Contact person name"><input aria-label="Contact person" className={inputCls} value={l.contact_person} onChange={(e) => set("contact_person", e.target.value)} /></Field>
+          <Field label="Mobile (required, must be unique in this business)"><input aria-label="Mobile" className={inputCls} value={l.mobile} onChange={(e) => set("mobile", e.target.value)} /></Field>
+          <Field label="Email"><input aria-label="Email" className={inputCls} value={l.email} onChange={(e) => set("email", e.target.value)} /></Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="GSTN status">
+              <select aria-label="GST status" className={inputCls} value={l.gst_type} onChange={(e) => set("gst_type", e.target.value)}>
+                <option value="unregistered">Unregistered</option><option value="registered">Registered</option><option value="consumer">Consumer</option>
+              </select>
+            </Field>
+            <Field label="GSTIN"><input aria-label="GSTIN" className={inputCls} value={l.gstin} onChange={(e) => { const v = e.target.value.toUpperCase(); set("gstin", v); const r = validateGstin(v); if (r.valid) { if (!l.state) set("state", r.state); if (!l.pan) set("pan", r.pan); } }} /><GstinHint value={l.gstin} /></Field>
+          </div>
+          <Field label="PAN"><input aria-label="PAN" className={inputCls} value={l.pan} onChange={(e) => set("pan", e.target.value.toUpperCase())} /></Field>
+          {l.kind === "vendor" && (
+            <>
+              <Field label="MSME / other registrations"><input aria-label="MSME or other registrations" className={inputCls} value={l.msme} onChange={(e) => set("msme", e.target.value)} /></Field>
+              <div className="grid grid-cols-3 gap-2">
+                <input aria-label="Bank name" placeholder="Bank name" className={inputCls} value={l.bank_details?.bank_name || ""} onChange={(e) => set("bank_details", { ...l.bank_details, bank_name: e.target.value })} />
+                <input aria-label="Account number" placeholder="Account no." className={inputCls} value={l.bank_details?.account_number || ""} onChange={(e) => set("bank_details", { ...l.bank_details, account_number: e.target.value })} />
+                <input aria-label="IFSC" placeholder="IFSC" className={inputCls} value={l.bank_details?.ifsc || ""} onChange={(e) => set("bank_details", { ...l.bank_details, ifsc: e.target.value })} />
+              </div>
+            </>
+          )}
+          <div className="pt-2 border-t border-gray-200">
+            <p className="text-xs font-medium text-gray-500 mb-2">Address</p>
+            <div className="grid grid-cols-2 gap-2">
+              <input aria-label="Office or flat no." placeholder="Office/Flat No." className={inputCls} value={l.office_no} onChange={(e) => set("office_no", e.target.value)} />
+              <input aria-label="Building" placeholder="Building" className={inputCls} value={l.building_name} onChange={(e) => set("building_name", e.target.value)} />
+              <input aria-label="Street" placeholder="Street" className={inputCls} value={l.street_name} onChange={(e) => set("street_name", e.target.value)} />
+              <input aria-label="City" placeholder="City" className={inputCls} value={l.city} onChange={(e) => set("city", e.target.value)} />
+              <select aria-label="State" className={inputCls} value={l.state} onChange={(e) => set("state", e.target.value)} title="The state decides IGST or CGST + SGST">
+                <option value="">State…</option>
+                {states.map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+              <input aria-label="Pin code" placeholder="Pin code" className={inputCls} value={l.pin_code} onChange={(e) => set("pin_code", e.target.value)} />
+            </div>
+            <p className="text-[10px] text-gray-400 mt-1">The state (or the first two digits of the GSTIN) decides whether a bill gets IGST or CGST + SGST.</p>
+          </div>
+        </>
+      )}
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Opening balance"><input aria-label="Opening balance" type="number" className={inputCls} value={l.opening_balance} onChange={(e) => set("opening_balance", parseFloat(e.target.value) || 0)} /></Field>
+        <Field label="Side"><select aria-label="Opening side" className={inputCls} value={l.opening_side} onChange={(e) => set("opening_side", e.target.value)}><option value="Dr">Dr</option><option value="Cr">Cr</option></select></Field>
+      </div>
+    </div>
+  );
 }
 
-// ---------------- Vouchers (invoices, receipts, payments, journals...) ----------------
-export async function fetchVouchers(businessId, vtypes) {
-  return fetchAllPages(() => {
-    let q = supabase.from("acc_vouchers").select("*").eq("business_id", businessId).order("vdate", { ascending: false }).order("id");
-    if (vtypes) q = q.in("vtype", vtypes);
-    return q;
-  });
-}
-export async function fetchVoucherLines(businessId) {
-  return fetchAllPages(() => supabase.from("acc_voucher_lines").select("*").eq("business_id", businessId).order("id"));
-}
-export async function fetchVoucherItems(voucherId) {
-  const { data, error } = await supabase.from("acc_voucher_items").select("*").eq("voucher_id", voucherId).order("line_no");
-  if (error) throw error;
-  return data;
-}
-export async function fetchAllocations(businessId) {
-  return fetchAllPages(() => supabase.from("acc_allocations").select("*").eq("business_id", businessId).order("id"));
-}
-export async function saveVoucher(voucher, items, lines, allocs = []) {
-  // The accounting engine labels ledger lines {ledgerId}; the database expects {ledger_id}.
-  const { data, error } = await supabase.rpc("acc_save_voucher", {
-    p_voucher: voucher, p_items: items, p_lines: toDbLines(lines), p_allocs: allocs,
-  });
-  if (error) throw new Error(friendlyDbError(error.message, voucher.voucher_no));
-  return data;
-}
-export async function deleteVoucher(id) {
-  const { error } = await supabase.from("acc_vouchers").delete().eq("id", id);
-  if (error) throw error;
+export function ledgerFormInvalid(l) {
+  const isParty = l.kind === "customer" || l.kind === "vendor";
+  return !String(l.name || "").trim() || (isParty && !String(l.mobile || "").trim());
 }
 
-/**
- * Next voucher number. `cfg` is the business's numbering setup for this document type
- * ({prefix, suffix, start, pad}); without one, `defaultPrefix` + 4 digits is used.
- * Looks at every existing number in the same format (and financial year when {FY} is used),
- * so a number typed by hand never throws the automatic sequence off.
- */
-export async function nextVoucherNumber(businessId, vtype, defaultPrefix = "", cfg = null, dateISO = new Date().toISOString().slice(0, 10)) {
-  const c = normalizeNumbering(cfg || { prefix: defaultPrefix }, defaultPrefix);
-  const rows = await fetchAllPages(() => supabase.from("acc_vouchers").select("voucher_no").eq("business_id", businessId).eq("vtype", vtype).order("id"));
-  return nextVoucherNo(rows.map((r) => r.voucher_no), c, dateISO);
-}
-
-// ---------------- Timesheets ----------------
-export async function fetchTimesheets(businessId) {
-  const { data, error } = await supabase.from("acc_timesheets").select("*").eq("business_id", businessId).order("tdate", { ascending: false });
-  if (error) throw error;
-  return data;
-}
-export async function saveTimesheet(row) {
-  const { id, cleaned } = cleanRow(row, ["hours"]);
-  if (id) { const { error } = await supabase.from("acc_timesheets").update(cleaned).eq("id", id); if (error) throw error; return id; }
-  const { data, error } = await supabase.from("acc_timesheets").insert(cleaned).select().single();
-  if (error) throw error;
-  return data.id;
-}
-export async function deleteTimesheet(id) {
-  const { error } = await supabase.from("acc_timesheets").delete().eq("id", id);
-  if (error) throw error;
-}
-
-// ---------------- Bank import ----------------
-export async function fetchBankRows(businessId, bankLedgerId) {
-  return fetchAllPages(() => {
-    let q = supabase.from("acc_bank_rows").select("*").eq("business_id", businessId).order("txn_date", { ascending: false }).order("id");
-    if (bankLedgerId) q = q.eq("bank_ledger_id", bankLedgerId);
-    return q;
-  });
-}
-export async function insertBankRows(rows) {
-  for (let i = 0; i < rows.length; i += 500) {
-    const { error } = await supabase.from("acc_bank_rows").insert(rows.slice(i, i + 500));
-    if (error) throw error;
-  }
-}
-export async function updateBankRow(id, fields) {
-  const { error } = await supabase.from("acc_bank_rows").update(fields).eq("id", id);
-  if (error) throw error;
-}
-
-export async function updateVoucherMeta(id, meta) {
-  const { error } = await supabase.from("acc_vouchers").update({ meta }).eq("id", id);
-  if (error) throw error;
-}
-
-// ---------------- Salespersons ----------------
-export async function fetchSalespersons(businessId) {
-  const { data, error } = await supabase.from("acc_salespersons").select("*").eq("business_id", businessId).order("name");
-  if (error) throw error;
-  return data;
-}
-export async function saveSalesperson(row) {
-  const { id, cleaned } = cleanRow(row);
-  if (id) { const { error } = await supabase.from("acc_salespersons").update(cleaned).eq("id", id); if (error) throw error; return id; }
-  const { data, error } = await supabase.from("acc_salespersons").insert(cleaned).select().single();
-  if (error) throw error;
-  return data.id;
-}
-export async function deleteSalesperson(id) {
-  const { error } = await supabase.from("acc_salespersons").delete().eq("id", id);
-  if (error) throw error;
-}
-
-// ---------------- Invoice attachments ----------------
-export async function fetchAttachments(voucherId) {
-  const { data, error } = await supabase.from("acc_attachments").select("id,file_name,mime_type,size_bytes").eq("voucher_id", voucherId).order("created_at");
-  if (error) throw error;
-  return data;
-}
-export async function fetchAttachmentData(id) {
-  const { data, error } = await supabase.from("acc_attachments").select("data,file_name,mime_type").eq("id", id).single();
-  if (error) throw error;
-  return data;
-}
-export const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024;
-export async function uploadAttachment(businessId, voucherId, file) {
-  if (file.size > MAX_ATTACHMENT_BYTES) throw new Error(`${file.name} is larger than 2 MB.`);
-  const data = await new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onload = () => resolve(r.result);
-    r.onerror = reject;
-    r.readAsDataURL(file);
-  });
-  const { error } = await supabase.from("acc_attachments").insert({ business_id: businessId, voucher_id: voucherId, file_name: file.name, mime_type: file.type, size_bytes: file.size, data });
-  if (error) throw error;
-}
-export async function deleteAttachment(id) {
-  const { error } = await supabase.from("acc_attachments").delete().eq("id", id);
-  if (error) throw error;
-}
-
-// ---------------- Other Taxes master ----------------
-export async function fetchOtherTaxes(businessId) {
-  const { data, error } = await supabase.from("acc_other_taxes").select("*").eq("business_id", businessId).order("name");
-  if (error) throw error;
-  return data;
-}
-export async function saveOtherTax(row) {
-  const { id, cleaned } = cleanRow(row, ["value"]);
-  if (id) { const { error } = await supabase.from("acc_other_taxes").update(cleaned).eq("id", id); if (error) throw error; return id; }
-  const { data, error } = await supabase.from("acc_other_taxes").insert(cleaned).select().single();
-  if (error) throw error;
-  return data.id;
-}
-export async function deleteOtherTax(id) {
-  const { error } = await supabase.from("acc_other_taxes").delete().eq("id", id);
-  if (error) throw error;
-}
-
-// ---------------- Payments against an invoice (can be split across Cash and Bank) ----------------
-export async function recordInvoicePayment(invoiceId, receiptVoucher, lines) {
-  const { data, error } = await supabase.rpc("acc_record_invoice_payment", { p_invoice: invoiceId, p_receipt: receiptVoucher, p_lines: toDbLines(lines) });
-  if (error) throw new Error(friendlyDbError(error.message, receiptVoucher.voucher_no));
-  return data;
-}
-
-// ---------------- Proforma -> Tax invoice (the database allows this only once) ----------------
-export async function convertProforma(proformaId, voucher, items, lines) {
-  const { data, error } = await supabase.rpc("acc_convert_proforma", { p_proforma: proformaId, p_voucher: voucher, p_items: items, p_lines: toDbLines(lines) });
-  if (error) throw new Error(friendlyDbError(error.message, voucher.voucher_no));
-  return data;
-}
-
-// ---------------- Business settings (custom fields, charges, default terms...) ----------------
-export async function updateBusinessSettings(businessId, patch) {
-  const { data, error } = await supabase.from("acc_businesses").select("settings").eq("id", businessId).single();
-  if (error) throw error;
-  const merged = { ...(data.settings || {}), ...patch };
-  const { error: e2 } = await supabase.from("acc_businesses").update({ settings: merged }).eq("id", businessId);
-  if (e2) throw e2;
-  return merged;
-}
-
-/** Every item line of the business (for the inventory register). Read in pages. */
-export async function fetchAllVoucherItems(businessId) {
-  return fetchAllPages(() => supabase.from("acc_voucher_items").select("voucher_id,item_id,qty,rate,amount,extra").eq("business_id", businessId).order("id"));
-}
-
-// ---------------- Paying a purchase invoice (can be split across Cash and Bank) ----------------
-export async function recordBillPayment(billId, paymentVoucher, lines) {
-  const { data, error } = await supabase.rpc("acc_record_bill_payment", { p_bill: billId, p_payment: paymentVoucher, p_lines: toDbLines(lines) });
-  if (error) throw new Error(friendlyDbError(error.message, paymentVoucher.voucher_no));
-  return data;
-}
-
-export async function deleteBankRow(id) {
-  const { error } = await supabase.from("acc_bank_rows").delete().eq("id", id);
-  if (error) throw error;
-}
-export async function fetchTimesheetsPaged(businessId) {
-  return fetchAllPages(() => supabase.from("acc_timesheets").select("*").eq("business_id", businessId).order("tdate", { ascending: false }).order("id"));
+export function LedgerForm({ existing, onCancel, onSave }) {
+  const [l, setL] = useState(existing);
+  const set = (k, v) => setL((p) => ({ ...p, [k]: v }));
+  return (
+    <div className="max-w-lg">
+      <BackHeader title={existing.id ? "Edit ledger" : `New ${l.kind}`} onBack={onCancel} />
+      <div className="bg-white border border-gray-200 rounded-lg p-5 space-y-4">
+        <LedgerFormBody l={l} set={set} />
+        <button onClick={() => onSave(l)} disabled={ledgerFormInvalid(l)} className="w-full bg-black disabled:opacity-40 text-white rounded py-2.5 text-sm font-medium">Save</button>
+      </div>
+    </div>
+  );
 }
